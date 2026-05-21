@@ -4,17 +4,35 @@ Center-relay audio server for [Network Ultra](https://github.com/GeekASMR/WDM2VS
 
 This is the open-source server side. The client plugins are closed-source and shipped with WDM2VST Ultra.
 
-## Quick install (Linux)
+## Quick install (Linux, recommended)
 
 SSH into your server and run:
 
 ```bash
-curl -fsSL https://github.com/GeekASMR/network-ultra-server/releases/latest/download/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/GeekASMR/network-ultra-server/main/scripts/install-from-source.sh | sudo bash
 ```
 
-The script downloads the latest binary, generates a default config, registers a `systemd` service, and starts it. About 60 seconds end-to-end.
+That's it. The script:
 
-After install, point your VST plugin to `ws://<your-server-ip>:18900`.
+1. Detects your distro and architecture
+2. Installs Go 1.22 if not already present (~120 MB, one-time)
+3. Clones this repo to `/opt/network-ultra-src`
+4. Builds the binary with `go build`
+5. Generates `/etc/network-ultra/config.toml` with a random admin token
+6. Registers a `systemd` service and starts it
+7. Hits `/healthz` to confirm
+
+End-to-end ~60 seconds on a 4-core VPS, ~2 minutes on a tiny one. After install, point your VST plugin to `ws://<your-server-ip>:18900`.
+
+To update later, run the same command again.
+
+## Alternative: install pre-built binary
+
+(For environments where you don't want Go installed.) Once binaries are published in [releases](https://github.com/GeekASMR/network-ultra-server/releases/latest):
+
+```bash
+curl -fsSL https://github.com/GeekASMR/network-ultra-server/releases/latest/download/install.sh | sudo bash
+```
 
 ## Manual install
 

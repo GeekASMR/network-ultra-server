@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Network Ultra Server one-shot installer for Linux.
-# Usage:
+# Network Ultra Server 一键安装脚本(下载预编译二进制)
+# 用法:
 #   curl -fsSL https://github.com/GeekASMR/network-ultra-server/releases/latest/download/install.sh | sudo bash
 set -euo pipefail
 
@@ -15,35 +15,35 @@ c_grn()   { printf '\033[32m%s\033[0m\n' "$*"; }
 c_blu()   { printf '\033[36m%s\033[0m\n' "$*"; }
 step()    { c_blu "[$1] $2"; }
 
-# 0. Sanity checks
+# 0. 前置检查
 if [[ "$(uname -s)" != "Linux" ]]; then
-  c_red "This installer is Linux-only. Got: $(uname -s)"
+  c_red "本脚本仅支持 Linux,当前系统:$(uname -s)"
   exit 1
 fi
 if [[ "${EUID}" -ne 0 ]]; then
-  c_red "Please run as root (use sudo)."
+  c_red "请用 root 权限执行(加 sudo)。"
   exit 1
 fi
 if [[ ! -d /run/systemd/system ]]; then
-  c_red "systemd is required (no /run/systemd/system found)."
+  c_red "需要 systemd(/run/systemd/system 不存在)。"
   exit 1
 fi
 
-step "1/6" "Detecting platform"
+step "1/6" "检测平台"
 ARCH=$(uname -m)
 case "$ARCH" in
   x86_64)  TARGET="linux-amd64" ;;
   aarch64) TARGET="linux-arm64" ;;
-  *)       c_red "Unsupported arch: $ARCH"; exit 1 ;;
+  *)       c_red "不支持的 CPU 架构:$ARCH"; exit 1 ;;
 esac
-echo "  arch=$ARCH target=$TARGET"
+echo "  架构 = $ARCH,二进制 = $TARGET"
 
 if ss -tlnp 2>/dev/null | grep -qE ':18900\b'; then
-  c_red "Port 18900 already in use. Free it first or stop conflicting services."
+  c_red "端口 18900 已被占用,请先停掉冲突服务。"
   exit 1
 fi
 
-step "2/6" "Downloading binary"
+step "2/6" "下载二进制"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -53,16 +53,16 @@ URL_SUM="${URL_BIN}.sha256"
 curl -fsSL "$URL_BIN" -o "$TMP/nus.bin"
 curl -fsSL "$URL_SUM" -o "$TMP/nus.sha256" || true
 if [[ -s "$TMP/nus.sha256" ]]; then
-  ( cd "$TMP" && sha256sum -c <(awk '{print $1"  nus.bin"}' nus.sha256) ) || { c_red "Checksum failed"; exit 1; }
+  ( cd "$TMP" && sha256sum -c <(awk '{print $1"  nus.bin"}' nus.sha256) ) || { c_red "校验和不匹配,下载可能损坏"; exit 1; }
 fi
 install -m 0755 "$TMP/nus.bin" "$BIN_PATH"
-echo "  installed to $BIN_PATH"
+echo "  已安装到 $BIN_PATH"
 
-step "3/6" "Generating config"
+step "3/6" "生成配置"
 mkdir -p "$CFG_DIR"
 ADMIN_TOKEN=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | xxd -p -c 64)
 if [[ -f "$CFG_FILE" ]]; then
-  echo "  $CFG_FILE already exists; keeping existing config."
+  echo "  $CFG_FILE 已存在,保留原配置不覆盖。"
 else
   cat > "$CFG_FILE" <<EOF
 [server]
@@ -94,10 +94,10 @@ room_list_per_peer_per_minute = 60
 audio_frames_per_peer_per_second = 200
 EOF
   chmod 0640 "$CFG_FILE"
-  echo "  wrote $CFG_FILE"
+  echo "  已写入 $CFG_FILE"
 fi
 
-step "4/6" "Installing systemd service"
+step "4/6" "注册 systemd 服务"
 cat > "$SVC_FILE" <<'EOF'
 [Unit]
 Description=Network Ultra Audio Server
@@ -124,9 +124,9 @@ WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
 systemctl enable --now network-ultra-server >/dev/null
-echo "  systemctl unit installed and started"
+echo "  systemd 服务已启动"
 
-step "5/6" "Health check"
+step "5/6" "健康检查"
 HEALTH_OK=0
 for _ in 1 2 3 4 5; do
   sleep 1
@@ -136,35 +136,34 @@ for _ in 1 2 3 4 5; do
   fi
 done
 if [[ "$HEALTH_OK" -ne 1 ]]; then
-  c_red "Health check failed. Check: journalctl -u network-ultra-server -n 50"
+  c_red "健康检查失败,请查看日志:journalctl -u network-ultra-server -n 50"
   exit 1
 fi
-echo "  /healthz responding OK"
+echo "  /healthz 响应正常"
 
-step "6/6" "Connection info"
+step "6/6" "完成"
 PUB_IP=$(curl -fs --max-time 3 https://api.ipify.org 2>/dev/null || echo "")
 [[ -z "$PUB_IP" ]] && PUB_IP=$(curl -fs --max-time 3 https://ifconfig.me 2>/dev/null || echo "")
-[[ -z "$PUB_IP" ]] && PUB_IP="<your-server-ip>"
+[[ -z "$PUB_IP" ]] && PUB_IP="<服务器公网 IP>"
 
 cat <<EOF
 
 ═════════════════════════════════════════════════════════════
-$(c_grn "  Network Ultra Server is running")
+$(c_grn "  Network Ultra Server 已成功启动")
 ═════════════════════════════════════════════════════════════
 
-  Connect from your VST plugin:
+  在 VST 插件里填入服务器地址:
     $(c_blu "ws://${PUB_IP}:18900")
 
-  Admin token (write this down, it is also in $CFG_FILE):
+  Admin Token(已写入 $CFG_FILE,妥善保存):
     ${ADMIN_TOKEN}
 
-  Useful commands:
-    systemctl status network-ultra-server
-    journalctl -u network-ultra-server -f
-    curl http://127.0.0.1:18901/healthz
-    curl http://127.0.0.1:18901/metrics
+  常用命令:
+    systemctl status network-ultra-server   # 查看服务状态
+    journalctl -u network-ultra-server -f   # 看实时日志
+    curl http://127.0.0.1:18901/healthz     # 健康检查
 
-  Need TLS / a domain? Edit $CFG_FILE and restart the service.
-  Docs:  https://github.com/${REPO}
+  需要 TLS 域名?编辑 $CFG_FILE 的 [tls] 段后重启服务。
+  文档:https://github.com/${REPO}
 
 EOF

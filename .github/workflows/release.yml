@@ -40,6 +40,7 @@ jobs:
           CGO_ENABLED: 0
         run: |
           mkdir -p dist
+          go mod tidy
           go build -trimpath -ldflags="-s -w" \
             -o dist/network-ultra-server-${{ matrix.target }}${{ matrix.ext }} \
             ./cmd/server

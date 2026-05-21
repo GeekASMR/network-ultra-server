@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"sync"
 
-	"nhooyr.io/websocket"
+	"github.com/coder/websocket"
 )
 
 // Conn wraps a nhooyr WebSocket with a writeQueue + write goroutine so multiple

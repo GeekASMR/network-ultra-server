@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"nhooyr.io/websocket"
+	"github.com/coder/websocket"
 
 	"github.com/GeekASMR/network-ultra-server/internal/metrics"
 	"github.com/GeekASMR/network-ultra-server/internal/proto"

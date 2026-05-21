@@ -1,0 +1,10 @@
+# Always use LF line endings for scripts and Go source.
+* text=auto eol=lf
+*.go text eol=lf
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+LICENSE text eol=lf
+Makefile text eol=lf
+*.ps1 text eol=crlf

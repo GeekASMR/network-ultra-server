@@ -225,9 +225,9 @@ func (r *Room) fanOut(f *Frame) {
 		if p.ID == f.SourcePeerID {
 			continue
 		}
-		if p.Role != "recv" {
-			continue
-		}
+		// Forward to every other peer in the room. Subscription filtering is
+		// per-peer (via Subscribe RPC) and defaults to "subscribe to all" when
+		// the peer never sent one. Role-based filtering is left to the client.
 		if !p.IsSubscribed(f.SourcePeerID) {
 			continue
 		}

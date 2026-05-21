@@ -206,23 +206,17 @@ func readText(ctx context.Context, c *websocket.Conn) (proto.Envelope, error) {
 }
 
 func drainLoop(ctx context.Context, c *websocket.Conn) {
+	// IMPORTANT: coder/websocket maps ctx cancellation to conn close (not just
+	// per-read deadline). So we must NOT cancel a per-iteration context.
+	// Use the parent ctx and let Read block; when parent expires the conn
+	// will close which is fine.
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-		rctx, cancel := context.WithTimeout(ctx, 1*time.Second)
-		mt, data, err := c.Read(rctx)
-		cancel()
+		mt, data, err := c.Read(ctx)
 		if err != nil {
-			if errors.Is(err, context.DeadlineExceeded) {
-				continue
-			}
-			if errors.Is(err, context.Canceled) {
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 				return
 			}
-			logf("(read err: %v)", err)
+			logf("(drain read err: %v)", err)
 			return
 		}
 		switch mt {

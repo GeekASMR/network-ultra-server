@@ -13,17 +13,7 @@
 
 服务器是纯转发层（不解码音频、不存储数据），只负责房间编排 + 二进制帧 fan-out。客户端见 [Releases](https://github.com/GeekASMR/network-ultra-server/releases/latest)。
 
-## 公益服务器
-
-不想自建可以直接用：
-
-```
-ws://146.56.202.138:18900
-```
-
-香港节点，国内外可达，无密码限制。商用/重要演出建议自建。
-
-## 一键自建（Linux 推荐）
+## 自建服务器（Linux 推荐）
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/GeekASMR/network-ultra-server/main/scripts/install-from-source.sh | sudo bash
@@ -116,6 +106,6 @@ curl http://127.0.0.1:18901/metrics
 
 ## License
 
-MIT — 见 [LICENSE](./LICENSE)。
+服务器（本仓库）：MIT — 见 [LICENSE](./LICENSE)。
 
-服务器和客户端都是开源的。客户端在 [Releases](https://github.com/GeekASMR/network-ultra-server/releases/latest) 提供 Windows 安装包。
+客户端 VST3 插件：闭源商业产品，不接受 PR / 源码请求。仅在 [Releases](https://github.com/GeekASMR/network-ultra-server/releases/latest) 提供 Windows 安装包。

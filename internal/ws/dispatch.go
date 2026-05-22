@@ -20,10 +20,10 @@ import (
 
 const (
 	serverVersion       = "1.0.0"
-	writeTimeout        = 5 * time.Second
+	writeTimeout        = 10 * time.Second // single frame write deadline; tolerant of 500ms RTT stalls
 	helloTimeout        = 10 * time.Second
 	pingTimeout         = 30 * time.Second
-	connWriteQueueDepth = 512
+	connWriteQueueDepth = 1024 // ~10s of audio at 100 fps; absorbs long-RTT bursts
 )
 
 type Server struct {

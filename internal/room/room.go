@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	audioChBuffer       = 256
+	audioChBuffer       = 512 // ~5s @ 100 fps; keeps fan-out alive through long-RTT stalls
 	roomEmptyDestroyDur = 30 * time.Second
 	roomIdleNoJoinDur   = 60 * time.Second
 )

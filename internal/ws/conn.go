@@ -5,12 +5,21 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/coder/websocket"
 )
 
 // Conn wraps a nhooyr WebSocket with a writeQueue + write goroutine so multiple
 // senders (forwarder + control handlers) don't race on the underlying conn.
+//
+// Backpressure policy:
+//   * Control frames (text) MUST be delivered: blocking enqueue with short
+//     timeout; on persistent failure the conn is closed (the peer is dead).
+//   * Audio frames (binary) MAY be dropped: when the queue is full we drop
+//     the OLDEST queued audio frame to make room, so a slow long-RTT receiver
+//     doesn't bring the whole connection down. This is what lets sessions
+//     stay alive over 500 ms+ RTT links where TCP momentarily stalls.
 type Conn struct {
 	c   *websocket.Conn
 	log *slog.Logger
@@ -55,15 +64,78 @@ func (cn *Conn) read(ctx context.Context) (websocket.MessageType, []byte, error)
 }
 
 func (cn *Conn) write(mt websocket.MessageType, data []byte) error {
+	// Audio (binary) is droppable; control (text) is not. The split exists so
+	// a transient long-RTT stall on the receive side can't kill the session
+	// as long as control plane is still flowing.
+	if mt == websocket.MessageBinary {
+		return cn.writeAudio(data)
+	}
+	return cn.writeControl(mt, data)
+}
+
+// writeControl enqueues a text/control frame. Blocks briefly when the queue is
+// momentarily full (long RTT spikes happen) and only closes the conn if the
+// queue is *still* full after the timeout — at which point the peer is
+// genuinely dead.
+func (cn *Conn) writeControl(mt websocket.MessageType, data []byte) error {
 	select {
 	case cn.writeCh <- outgoing{mt: mt, data: data}:
 		return nil
 	case <-cn.doneCh:
 		return errors.New("conn closed")
 	default:
-		// queue full → slow consumer; close conn to free room forwarder.
+	}
+	// Queue momentarily full. Wait up to writeTimeout for it to drain.
+	timer := time.NewTimer(writeTimeout)
+	defer timer.Stop()
+	select {
+	case cn.writeCh <- outgoing{mt: mt, data: data}:
+		return nil
+	case <-cn.doneCh:
+		return errors.New("conn closed")
+	case <-timer.C:
 		cn.close()
-		return errors.New("write queue full")
+		return errors.New("control write queue stuck")
+	}
+}
+
+// writeAudio enqueues a binary audio frame. Never blocks: if the queue is
+// full it drops the OLDEST queued audio frame and inserts the new one. This
+// keeps the conn alive across long-RTT spikes, trading a brief audio glitch
+// for not killing the whole session.
+func (cn *Conn) writeAudio(data []byte) error {
+	for {
+		select {
+		case cn.writeCh <- outgoing{mt: websocket.MessageBinary, data: data}:
+			return nil
+		case <-cn.doneCh:
+			return errors.New("conn closed")
+		default:
+		}
+		// Queue full → drop the oldest queued frame and retry. We pick the
+		// oldest *audio* frame; if the head happens to be a control frame
+		// we leave it (rare: text writes are < 1/s, audio is ~100/s).
+		select {
+		case msg := <-cn.writeCh:
+			if msg.mt != websocket.MessageBinary {
+				// Re-queue control message (no choice: would be unfair to
+				// drop it). If channel is *still* full we'll loop and try
+				// again; in practice the very next iteration will fit
+				// because we already removed something.
+				select {
+				case cn.writeCh <- msg:
+				default:
+					// Channel full again, give up rather than spin: the
+					// receiver is so slow that this connection is dead.
+					cn.close()
+					return errors.New("audio write queue jammed")
+				}
+			}
+		case <-cn.doneCh:
+			return errors.New("conn closed")
+		default:
+			// Race: channel was full a microsecond ago, now empty. Try again.
+		}
 	}
 }
 

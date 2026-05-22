@@ -37,7 +37,7 @@ import (
 const (
 	subprotocol         = "network-ultra-v1"
 	relayCloseTimeout   = 3 * time.Second
-	upstreamDialTimeout = 8 * time.Second
+	upstreamDialTimeout = 15 * time.Second // tolerant of 500 ms RTT + retransmits during peak hours
 )
 
 func main() {

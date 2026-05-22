@@ -44,7 +44,17 @@ esac
 echo "  架构 = $ARCH (Go 架构 = $GOARCH)"
 
 if ss -tlnp 2>/dev/null | grep -qE ':18900\b'; then
-  c_red "端口 18900 已被占用,请先停掉冲突服务。"; exit 1
+  # If our own systemd service is the one holding the port, gracefully stop
+  # it so the rest of the installer can re-deploy. Anything else (different
+  # service or container squatting on 18900) is a real conflict and bails.
+  if systemctl is-active --quiet network-ultra-server 2>/dev/null \
+       && ss -tlnp 2>/dev/null | grep -E ':18900\b' | grep -q 'network-ultra-s'; then
+    echo "  端口 18900 被旧版 network-ultra-server 占用,先停止以便升级..."
+    systemctl stop network-ultra-server || true
+    sleep 1
+  else
+    c_red "端口 18900 已被其它服务占用,请先停掉冲突服务。"; exit 1
+  fi
 fi
 
 step "2/7" "确认 Go >= ${GO_VERSION}"

@@ -79,6 +79,43 @@ mv -f "$TMP_BIN" "$BIN_PATH"
 chmod +x "$BIN_PATH"
 
 step "5/5" "启动新服务并健康检查"
+# UDP 数据面新增 18902 端口（v1.2+）。如果 iptables 默认 DROP，需要打开。
+# 用 iptables 而不是 ufw 因为腾讯云轻量很多模板没装 ufw，iptables 一定有。
+# 同步开 INPUT 和 OUTPUT，规则去重避免重复 append。
+if command -v iptables >/dev/null 2>&1; then
+  if ! iptables -C INPUT -p udp --dport 18902 -j ACCEPT 2>/dev/null; then
+    iptables -A INPUT -p udp --dport 18902 -j ACCEPT || true
+    echo "  已开放 UDP 18902（INPUT）"
+  fi
+  if ! iptables -C OUTPUT -p udp --sport 18902 -j ACCEPT 2>/dev/null; then
+    iptables -A OUTPUT -p udp --sport 18902 -j ACCEPT || true
+    echo "  已开放 UDP 18902（OUTPUT）"
+  fi
+fi
+
+# 如果 config.toml 里没有 udp_advertise_host，加上 — 否则服务器会下发
+# 0.0.0.0:18902 给客户端，客户端无法连。用本机第一个外网 IP 作默认值。
+CONF=/etc/network-ultra/config.toml
+if [[ -f "$CONF" ]] && ! grep -q '^udp_advertise_host' "$CONF"; then
+  PUBLIC_IP="$(hostname -I | awk '{print $1}')"
+  if [[ -n "$PUBLIC_IP" ]]; then
+    # 在 [server] section 末尾追加。如果没 [server] 段就什么都不动；
+    # 这种情况说明用户用了非默认 config，让他自己加。
+    awk -v ip="$PUBLIC_IP" '
+      /^\[server\]/ { in_server=1 }
+      /^\[/ && !/^\[server\]/ && in_server {
+        print "udp_advertise_host = \"" ip "\""
+        in_server=0
+      }
+      { print }
+      END {
+        if (in_server) print "udp_advertise_host = \"" ip "\""
+      }
+    ' "$CONF" > "$CONF.new" && mv "$CONF.new" "$CONF"
+    echo "  config.toml 已加 udp_advertise_host = \"$PUBLIC_IP\""
+  fi
+fi
+
 systemctl start "$SVC_NAME"
 
 # 给服务 3 秒钟起来
@@ -105,6 +142,7 @@ $(c_grn "  ✓ Network Ultra Server 升级完成")
   版本:  $OLD_REV → $NEW_REV
   状态:  $(systemctl is-active $SVC_NAME)
   端点:  ws://$(hostname -I | awk '{print $1}'):18900
+  UDP :  $(hostname -I | awk '{print $1}'):18902 (新音频通道, 自动 fallback 到 ws)
 
   实时日志:
     journalctl -u $SVC_NAME -f

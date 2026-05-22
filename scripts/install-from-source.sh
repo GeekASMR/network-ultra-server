@@ -86,28 +86,105 @@ fi
 export PATH="/usr/local/go/bin:$PATH"
 
 step "3/7" "拉取源码"
+# Curated proxy list (re-tested 2026-05-23). The script tries each in order
+# until one succeeds. Direct GitHub access is tried first so users with good
+# connectivity (overseas, or with their own VPN) take the fast path.
+PROXIES=(
+  ""                                  # 空 = 直连 github.com (overseas / w/ VPN)
+  "https://gh-proxy.com/"             # 国内 ~830 ms
+  "https://ghproxy.net/"              # 国内 ~1000 ms
+  "https://ghfast.top/"               # 国内 ~1100 ms
+  "https://gh.idayer.com/"            # 国内 ~1700 ms 备胎
+)
+
+# fetch_via_proxies <github-url> <output-path-or-empty-for-stdout>
+# Tries each proxy in order until one downloads successfully (HTTP 200, body > 0).
+fetch_via_proxies() {
+  local gh_url="$1"
+  local dest="$2"
+  for prefix in "${PROXIES[@]}"; do
+    local final="${prefix}${gh_url}"
+    if [[ -n "$dest" ]]; then
+      if curl -fsSL --max-time 60 "$final" -o "$dest" 2>/dev/null; then
+        if [[ -s "$dest" ]]; then
+          [[ -n "$prefix" ]] && echo "    via 代理 $prefix" >&2
+          return 0
+        fi
+      fi
+    else
+      if curl -fsSL --max-time 60 "$final" 2>/dev/null; then
+        return 0
+      fi
+    fi
+  done
+  return 1
+}
+
+# git_clone_via_proxies <dest-dir>
+# Tries `git clone` against each proxy. Proxies for git over HTTPS work by
+# wrapping the clone URL the same way, which all 4 proxies above support.
+git_clone_via_proxies() {
+  local dest="$1"
+  for prefix in "${PROXIES[@]}"; do
+    local final="${prefix}https://github.com/GeekASMR/network-ultra-server.git"
+    if timeout 30 git clone --depth 1 "$final" "$dest" 2>/dev/null; then
+      [[ -n "$prefix" ]] && echo "    via 代理 $prefix" >&2
+      # Reset origin to canonical github.com so subsequent fetches don't pin
+      # the user to a single proxy. Future updates re-pick the fastest one.
+      ( cd "$dest" && git remote set-url origin "https://github.com/GeekASMR/network-ultra-server.git" )
+      return 0
+    fi
+  done
+  return 1
+}
+
 if [[ -d "$SRC_DIR/.git" ]]; then
-  ( cd "$SRC_DIR" && git fetch --tags origin && git reset --hard origin/main )
+  # Existing checkout. Try direct fetch first; fall back to swapping origin
+  # to a proxy when direct times out, then swap back for cleanliness.
+  if ! ( cd "$SRC_DIR" && timeout 30 git fetch --tags origin 2>/dev/null && git reset --hard origin/main ); then
+    echo "  直连 git fetch 慢/超时,改走代理..."
+    success=0
+    for prefix in "${PROXIES[@]}"; do
+      [[ -z "$prefix" ]] && continue
+      proxied="${prefix}https://github.com/GeekASMR/network-ultra-server.git"
+      if ( cd "$SRC_DIR" \
+           && git remote set-url origin "$proxied" \
+           && timeout 30 git fetch --tags origin 2>/dev/null \
+           && git reset --hard origin/main ); then
+        echo "    via 代理 $prefix"
+        success=1
+        break
+      fi
+    done
+    # Always restore canonical origin so the user has a clean remote.
+    ( cd "$SRC_DIR" && git remote set-url origin "$REPO_URL" )
+    if [[ $success -ne 1 ]]; then
+      c_red "  无法从任何代理拉取最新代码;保留现有版本"
+    fi
+  fi
   echo "  已更新 $SRC_DIR 到最新版本"
 else
   rm -rf "$SRC_DIR"
   mkdir -p "$SRC_DIR"
   # Try git clone first (gives us .git for future incremental updates), but
-  # fall back to a plain tar.gz from the GitHub release CDN if git is slow
-  # or blocked. Many CN ISPs throttle git protocol while letting HTTPS to
-  # codeload.github.com pass freely.
-  if timeout 30 git clone --depth 1 "$REPO_URL" "$SRC_DIR" 2>/dev/null; then
+  # fall back to a plain tar.gz when git is slow/blocked. Both paths walk
+  # the same proxy list, so behind GFW we still find a working route.
+  if git_clone_via_proxies "$SRC_DIR"; then
     echo "  已克隆到 $SRC_DIR (git)"
   else
-    echo "  git clone 慢/超时,改走 tar.gz CDN..."
+    echo "  git clone 全部失败,改走 tar.gz..."
     rm -rf "$SRC_DIR"
     mkdir -p "$SRC_DIR"
-    curl -fsSL --max-time 60 \
-      "https://github.com/GeekASMR/network-ultra-server/archive/refs/heads/main.tar.gz" \
-      -o /tmp/network-ultra-src.tar.gz
-    tar xzf /tmp/network-ultra-src.tar.gz -C "$SRC_DIR" --strip-components=1
-    rm -f /tmp/network-ultra-src.tar.gz
-    echo "  已解压到 $SRC_DIR (tar.gz)"
+    if fetch_via_proxies \
+        "https://github.com/GeekASMR/network-ultra-server/archive/refs/heads/main.tar.gz" \
+        /tmp/network-ultra-src.tar.gz; then
+      tar xzf /tmp/network-ultra-src.tar.gz -C "$SRC_DIR" --strip-components=1
+      rm -f /tmp/network-ultra-src.tar.gz
+      echo "  已解压到 $SRC_DIR (tar.gz)"
+    else
+      c_red "无法从任何代理下载源码,请检查网络或手动 git clone"
+      exit 1
+    fi
   fi
 fi
 
@@ -291,6 +368,9 @@ cat <<EOF
   以后升级:
     再跑一次同样的命令即可
     curl -fsSL https://raw.githubusercontent.com/GeekASMR/network-ultra-server/main/scripts/install-from-source.sh | sudo bash
+
+    国内访问慢?走代理:
+    curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/GeekASMR/network-ultra-server/main/scripts/install-from-source.sh | sudo bash
 
   需要 TLS 域名?编辑 $CFG_FILE 的 [tls] 段后重启服务。
   文档:https://github.com/GeekASMR/network-ultra-server

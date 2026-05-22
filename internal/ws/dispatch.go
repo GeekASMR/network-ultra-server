@@ -131,6 +131,29 @@ func (s *Server) run(parent context.Context, conn *Conn, remote string) error {
 	host, _, _ := net.SplitHostPort(remote)
 	s.Log.Info("peer authenticated", "peerId", peer.ID, "username", hello.Username, "host", host)
 
+	// Server-side WebSocket ping every 15s. Many residential / mobile
+	// networks silently drop idle TCP after ~30s; without a periodic
+	// keepalive packet the stateful firewall RSTs us, the client sees
+	// "peer close frame" and reconnects in a tight loop.
+	pingDone := make(chan struct{})
+	go func() {
+		t := time.NewTicker(15 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-pingDone:
+				return
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+				_ = conn.c.Ping(pctx)
+				cancel()
+			}
+		}
+	}()
+	defer close(pingDone)
+
 	// 2. Main loop.
 	for {
 		mt, payload, err := conn.read(ctx)

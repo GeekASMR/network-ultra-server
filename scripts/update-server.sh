@@ -3,9 +3,15 @@
 # 服务端一键升级脚本 — 拉最新代码、重新编译、平滑重启 systemd 服务。
 #
 # 用法（在服务器上执行，不要在本地运行）:
+#
+#   # 推荐：jsdelivr CDN 国内能直连
+#   curl -fsSL https://cdn.jsdelivr.net/gh/GeekASMR/network-ultra-server@main/scripts/update-server.sh | sudo bash
+#
+#   # 备用：ghproxy 镜像
+#   curl -fsSL https://ghproxy.com/https://raw.githubusercontent.com/GeekASMR/network-ultra-server/main/scripts/update-server.sh | sudo bash
+#
+#   # 直连（仅在你能直接访问 github 时）
 #   curl -fsSL https://raw.githubusercontent.com/GeekASMR/network-ultra-server/main/scripts/update-server.sh | sudo bash
-# 或者：
-#   ssh root@你的服务器IP 'curl -fsSL https://raw.githubusercontent.com/GeekASMR/network-ultra-server/main/scripts/update-server.sh | sudo bash'
 #
 # 前提：
 #   * 服务器已经通过 install-from-source.sh 完成首次安装
@@ -47,9 +53,46 @@ fi
 step "1/5" "拉取最新代码"
 cd "$SRC_DIR"
 # fetch+reset 而不是 pull：避免本地修改（如果有的话）阻塞升级
-git fetch --tags origin
+#
+# 国内网络 fetch github.com 经常超时，依次尝试镜像直到拿到代码：
+#   1. 直连 GitHub（有时能通，有就直接用）
+#   2. ghproxy.com 全代理
+#   3. ghproxy.net（备选）
+#   4. gitclone.com 镜像
+#   5. hub.gitmirror.com
+# 每个尝试 25 秒超时，避免一个挂了就僵住整个升级。
+fetch_with_url() {
+  local url="$1"
+  echo "  尝试 $url"
+  git remote set-url origin "$url"
+  timeout 25 git fetch --tags origin 2>&1
+}
+
+ORIG_URL=$(git remote get-url origin)
+FETCH_OK=0
+for url in \
+  "https://github.com/GeekASMR/network-ultra-server" \
+  "https://ghproxy.com/https://github.com/GeekASMR/network-ultra-server" \
+  "https://ghproxy.net/https://github.com/GeekASMR/network-ultra-server" \
+  "https://gitclone.com/github.com/GeekASMR/network-ultra-server" \
+  "https://hub.gitmirror.com/https://github.com/GeekASMR/network-ultra-server"
+do
+  if fetch_with_url "$url"; then
+    FETCH_OK=1
+    break
+  fi
+  echo "    （超时/失败，下一个）"
+done
+# 还原 origin url，避免镜像写死
+git remote set-url origin "$ORIG_URL"
+
+if [[ "$FETCH_OK" -ne 1 ]]; then
+  c_red "所有镜像都拉不下来。请手动检查网络或临时关闭 GFW 代理后重跑。"
+  exit 1
+fi
+
 OLD_REV=$(git rev-parse --short HEAD || echo "unknown")
-git reset --hard origin/main
+git reset --hard FETCH_HEAD
 NEW_REV=$(git rev-parse --short HEAD)
 echo "  $OLD_REV → $NEW_REV"
 

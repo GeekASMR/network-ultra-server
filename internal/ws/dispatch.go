@@ -37,9 +37,30 @@ type Server struct {
 	// Optional: the WS subprotocol clients must request.
 	Subprotocol string
 
+	// UDP data plane advertisement. Empty UdpEndpoint means UDP is disabled
+	// (Udp may still be set so DetachPeer is a no-op for code symmetry).
+	UdpEndpoint string
+
+	// UDP data plane (optional). When set, the WS welcome message advertises
+	// the UDP endpoint + a per-peer HMAC token; clients that successfully
+	// handshake on UDP will route audio there. Nil means UDP is disabled
+	// and all audio continues to flow over WebSocket binary frames.
+	Udp UdpAdvertiser
+
 	// stats
 	curConns int64
 	mu       sync.Mutex
+}
+
+// UdpAdvertiser is the small interface the WS layer needs from the UDP
+// data plane to advertise it in the welcome message and bind peers as they
+// authenticate. Implemented by udp.Server. Kept as an interface so the
+// ws package doesn't import the udp package directly (which would create
+// an import cycle since udp imports room).
+type UdpAdvertiser interface {
+	MintToken(peerID uuid.UUID) string
+	AttachPeer(p *room.Peer)
+	DetachPeer(p *room.Peer)
 }
 
 // HandleHTTP upgrades incoming HTTP into a WebSocket connection and runs it.
@@ -121,10 +142,23 @@ func (s *Server) run(parent context.Context, conn *Conn, remote string) error {
 	peer.AttachSender(conn.SendFunc())
 	defer peer.DetachSender()
 
-	if err := s.send(conn, proto.TypeWelcome, env.ID, proto.WelcomeData{
+	// Register the peer with the UDP data plane (if enabled). DetachPeer
+	// runs alongside DetachSender on disconnect so we don't keep stale
+	// UDP bindings.
+	if s.Udp != nil {
+		s.Udp.AttachPeer(peer)
+		defer s.Udp.DetachPeer(peer)
+	}
+
+	welcome := proto.WelcomeData{
 		PeerID:        peer.ID.String(),
 		ServerVersion: serverVersion,
-	}); err != nil {
+	}
+	if s.Udp != nil && s.UdpEndpoint != "" {
+		welcome.UdpEndpoint = s.UdpEndpoint
+		welcome.UdpToken = s.Udp.MintToken(peer.ID)
+	}
+	if err := s.send(conn, proto.TypeWelcome, env.ID, welcome); err != nil {
 		return err
 	}
 

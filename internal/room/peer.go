@@ -1,6 +1,7 @@
 package room
 
 import (
+	"net"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -11,6 +12,13 @@ import (
 // SendFunc is the callback the WS layer registers so the room can push
 // outbound frames to a peer without coupling to the websocket package.
 type SendFunc func(textPayload []byte, isBinary bool) error
+
+// UdpSendFunc is the callback the UDP layer registers so the room can push
+// audio frames over UDP without coupling to the udp package. It receives the
+// already-packed wire bytes (header + payload). Returns false if the peer
+// has no UDP endpoint bound or the UDP socket is gone — caller should
+// fall back to WS.
+type UdpSendFunc func(payload []byte) bool
 
 // Peer represents a single WebSocket-attached participant inside a Room.
 type Peer struct {
@@ -29,6 +37,14 @@ type Peer struct {
 	// send is the WS-layer-provided callback. Nil if the peer is detached.
 	mu   sync.RWMutex
 	send SendFunc
+
+	// UDP delivery: if set, audio fan-out prefers this; falls back to WS on
+	// nil return. Network thread reads/writes; brief lock.
+	udpSend UdpSendFunc
+
+	// UDP source address (set on UDP hello, validated on every packet).
+	// Stored as atomic.Pointer so reads are lock-free on the hot path.
+	udpAddr atomic.Pointer[net.UDPAddr]
 
 	// Last room reference (atomic-friendly) so we can clean up on disconnect.
 	curRoom atomic.Pointer[Room]
@@ -96,14 +112,35 @@ func (p *Peer) SendText(payload []byte) error {
 }
 
 func (p *Peer) SendBinary(payload []byte) error {
+	// Prefer UDP if the peer has bound a UDP source address. UDP path is
+	// lock-free on the hot send: udpSend reads udpAddr atomically and
+	// writes once. On any failure (nil func, addr expired, socket dead)
+	// we fall through to the WS path so the listener keeps hearing audio
+	// during brief UDP outages.
 	p.mu.RLock()
-	s := p.send
+	udp := p.udpSend
+	ws := p.send
 	p.mu.RUnlock()
-	if s == nil {
+	if udp != nil && udp(payload) {
 		return nil
 	}
-	return s(payload, true)
+	if ws == nil {
+		return nil
+	}
+	return ws(payload, true)
 }
+
+// AttachUdpSender registers a UDP send callback. Pass nil to detach.
+func (p *Peer) AttachUdpSender(s UdpSendFunc) {
+	p.mu.Lock()
+	p.udpSend = s
+	p.mu.Unlock()
+}
+
+// SetUdpAddr records the peer's UDP source address (called when the UDP
+// hello arrives). Pass nil to clear.
+func (p *Peer) SetUdpAddr(addr *net.UDPAddr) { p.udpAddr.Store(addr) }
+func (p *Peer) UdpAddr() *net.UDPAddr        { return p.udpAddr.Load() }
 
 // CurrentRoom returns the room this peer is in, or nil.
 func (p *Peer) CurrentRoom() *Room { return p.curRoom.Load() }

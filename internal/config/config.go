@@ -18,6 +18,8 @@ type Config struct {
 type ServerCfg struct {
 	Listen          string `toml:"listen"`
 	HealthListen    string `toml:"health_listen"`
+	UdpListen       string `toml:"udp_listen"`         // empty = UDP disabled
+	UdpAdvertiseHost string `toml:"udp_advertise_host"` // empty = derive from Listen
 	MaxRooms        int    `toml:"max_rooms"`
 	MaxPeersPerRoom int    `toml:"max_peers_per_room"`
 	MaxConnections  int    `toml:"max_connections"`
@@ -50,12 +52,14 @@ type RateLimitCfg struct {
 func Default() Config {
 	return Config{
 		Server: ServerCfg{
-			Listen:          "0.0.0.0:18900",
-			HealthListen:    "127.0.0.1:18901",
-			MaxRooms:        50,
-			MaxPeersPerRoom: 8,
-			MaxConnections:  200,
-			AdminToken:      "",
+			Listen:           "0.0.0.0:18900",
+			HealthListen:     "127.0.0.1:18901",
+			UdpListen:        "0.0.0.0:18902",
+			UdpAdvertiseHost: "", // empty = use the host the client connected via
+			MaxRooms:         50,
+			MaxPeersPerRoom:  8,
+			MaxConnections:   200,
+			AdminToken:       "",
 		},
 		TLS: TLSCfg{
 			Enabled: false,

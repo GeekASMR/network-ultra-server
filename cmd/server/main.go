@@ -6,9 +6,11 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 	"github.com/GeekASMR/network-ultra-server/internal/httpapi"
 	"github.com/GeekASMR/network-ultra-server/internal/metrics"
 	"github.com/GeekASMR/network-ultra-server/internal/room"
+	udpserver "github.com/GeekASMR/network-ultra-server/internal/udp"
 	"github.com/GeekASMR/network-ultra-server/internal/ws"
 )
 
@@ -57,6 +60,24 @@ func main() {
 		Log:            log,
 		MaxConnections: cfg.Server.MaxConnections,
 		Subprotocol:    "network-ultra-v1",
+	}
+
+	// UDP data plane (optional). When configured, the WS welcome will
+	// advertise the UDP endpoint + token, and clients route audio over
+	// UDP to dodge TCP head-of-line blocking on long-RTT links.
+	var udpSrv *udpserver.Server
+	if cfg.Server.UdpListen != "" {
+		udpSrv = udpserver.NewServer(log, mreg)
+		if err := udpSrv.Listen(cfg.Server.UdpListen); err != nil {
+			log.Error("udp listen failed; continuing without UDP", "err", err)
+			udpSrv = nil
+		} else {
+			defer udpSrv.Close()
+			wsServer.Udp = udpSrv
+			wsServer.UdpEndpoint = resolveUdpEndpoint(cfg.Server.UdpListen,
+				cfg.Server.UdpAdvertiseHost)
+			log.Info("udp data plane enabled", "advertise", wsServer.UdpEndpoint)
+		}
 	}
 
 	// HTTP mux for WS upgrade.
@@ -121,6 +142,35 @@ func main() {
 	_ = wsHTTP.Shutdown(shutdownCtx)
 	_ = healthHTTP.Shutdown(shutdownCtx)
 	log.Info("bye")
+}
+
+// resolveUdpEndpoint computes the "host:port" string we advertise to clients
+// in the WS welcome message.
+//
+//   listen        e.g. "0.0.0.0:18902"  → bind addr (port is what matters)
+//   advertise     e.g. "175.178.62.76"  → host advertised; empty = derive
+//
+// If advertise is empty we fall back to the listen host. If the listen host
+// is "0.0.0.0" or empty we leave the advertised endpoint blank — the client
+// will then know UDP is disabled and fall back to WS. Production deployments
+// should set udp_advertise_host explicitly to the public IP/hostname.
+func resolveUdpEndpoint(listen, advertise string) string {
+	_, port, err := net.SplitHostPort(listen)
+	if err != nil || port == "" {
+		return ""
+	}
+	if advertise == "" {
+		host, _, _ := net.SplitHostPort(listen)
+		if host == "" || host == "0.0.0.0" || host == "::" {
+			return ""
+		}
+		advertise = host
+	}
+	// Validate port is numeric (sanity).
+	if _, err := strconv.Atoi(port); err != nil {
+		return ""
+	}
+	return net.JoinHostPort(advertise, port)
 }
 
 func setupLogger(c config.LogCfg) *slog.Logger {

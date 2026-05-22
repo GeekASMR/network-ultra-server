@@ -97,6 +97,13 @@ type PingData struct {
 type WelcomeData struct {
 	PeerID        string `json:"peerId"`
 	ServerVersion string `json:"serverVersion"`
+	// UDP data plane: the client may send audio over UDP after this welcome.
+	// Empty UdpEndpoint means UDP is disabled on this server (client should
+	// fall back to WebSocket binary frames). UdpToken is opaque (HMAC) and
+	// must be presented in the first UDP packet so the server can bind the
+	// source IP:port back to this peerId.
+	UdpEndpoint string `json:"udpEndpoint,omitempty"` // "host:port" form
+	UdpToken    string `json:"udpToken,omitempty"`    // base64-std encoded
 }
 
 type ErrorData struct {

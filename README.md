@@ -13,6 +13,19 @@
 
 服务器是纯转发层（不解码音频、不存储数据），只负责房间编排 + 二进制帧 fan-out。客户端见 [Releases](https://github.com/GeekASMR/network-ultra-server/releases/latest)。
 
+## Repo 内容索引
+
+本仓库**同时承载服务端源码和客户端安装包发布**，[Releases](https://github.com/GeekASMR/network-ultra-server/releases) 列表里两类 artifact 用 title 前缀区分：
+
+| 前缀 | 含义 | 安装方式 |
+| --- | --- | --- |
+| `[Client]` | Windows VST3 插件安装包 | 下载 `Network_Ultra_Setup.exe` 双击运行 |
+| `[Server]` | 服务端预编译二进制（已停更） | 推荐改用本 README 下面的"一键安装"脚本从源码编译 |
+
+服务端**没有持续发布二进制 release**（旧的 `[Server] v1.0.0` 仅留作存档）。运行最新服务端的标准方式是 `scripts/install-from-source.sh` 直接从 main 分支拉源码 `go build`，几秒就能跑起来，且能即时享受 v1.2 UDP 数据面 / per-connection bridge proxy / Host-header endpoint 等所有改进。
+
+客户端代码闭源在另一私有工作区维护，本仓只发布 Windows 安装包；服务端代码是这里 `cmd/` + `internal/`，MIT 协议自由二次开发。
+
 ## 2 分钟自建（小白版）
 
 ### 准备

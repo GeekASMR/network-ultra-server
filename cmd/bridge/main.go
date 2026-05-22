@@ -1,35 +1,46 @@
-// network-ultra-bridge — local WebSocket relay for DAW hosts whose outbound
-// connections are firewalled (e.g. cracked Studio One on Windows).
+// network-ultra-bridge — local relay for DAW hosts whose outbound is firewalled.
 //
 //   Studio One ──► VST plugin ──ws://127.0.0.1:18900──► Bridge ──► remote server
-//                  (loopback, allowed)                    │
-//                                                         └──► ws://server:18900
-//                                                              (no firewall on
-//                                                               normal Windows app)
+//                                                       │
+//                              ──udp://127.0.0.1:18902──┤
+//                                                       └──udp://server:18902
 //
-// The bridge is a transparent byte-for-byte relay. It does no protocol parsing
-// beyond the WebSocket frame layer; control + audio frames pass through unmodified.
+// Why we proxy BOTH WS and UDP:
+//   * The plugin runs inside the DAW, which is often blocked outbound by
+//     Windows Firewall (cracked Studio One on China retail builds is the
+//     canonical case). The plugin can only reach 127.0.0.1.
+//   * The bridge is a normal Windows app — not blocked. It does the heavy
+//     lifting on both control plane (WebSocket) and data plane (UDP audio).
 //
-// Usage:
-//   network-ultra-bridge -listen 127.0.0.1:18900 -upstream ws://146.56.202.138:18900
-//
-// On launch the bridge accepts an unbounded number of plugin connections; each
-// gets its own dedicated upstream WebSocket. When the plugin disconnects, the
-// upstream is also closed; vice versa.
+// Wire-level behaviour:
+//   * Control: byte-for-byte WS relay, EXCEPT we sniff the JSON `welcome`
+//     frame coming back from the server and rewrite `udpEndpoint` to point
+//     at the bridge's own UDP listener (127.0.0.1:18902). The plugin then
+//     handshakes UDP with us, not with the remote server.
+//   * Audio out: every UDP packet on 127.0.0.1:18902 from the plugin is
+//     forwarded to the upstream UDP endpoint (host of the WS upstream URL,
+//     port 18902).
+//   * Audio in: every UDP packet from upstream is forwarded back to the
+//     plugin's most recent local UDP address. Because there's only one
+//     plugin per bridge instance, a single source-address binding is
+//     sufficient.
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
-	"strings"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -38,37 +49,181 @@ import (
 
 const (
 	subprotocol         = "network-ultra-v1"
-	relayCloseTimeout   = 3 * time.Second
-	upstreamDialTimeout = 15 * time.Second // tolerant of 500 ms RTT + retransmits during peak hours
+	upstreamDialTimeout = 15 * time.Second
+	udpListenPort       = 18902 // loopback UDP we expose to plugin
+	udpUpstreamPort     = 18902 // remote server UDP port (matches server config)
+	udpDatagramMax      = 9000
 )
+
+// udpProxy bridges plugin UDP traffic to the remote server.
+//
+// We use TWO sockets because a single socket bound to 127.0.0.1 can never
+// receive packets from the public internet (kernel routes them to a
+// 0.0.0.0-bound socket, not to 127.0.0.1). The two-socket design:
+//
+//   loopbackConn  : bound to 127.0.0.1:18902
+//                   receives from plugin, sends back to plugin
+//
+//   upstreamConn  : bound to 0.0.0.0:0  (ephemeral)
+//                   sends to remote server, receives replies, forwards back
+//                   to plugin via loopbackConn
+//
+// The plugin's source address is captured the first time we see a packet
+// from it; replies from upstream are sent to that address.
+type udpProxy struct {
+	log *slog.Logger
+
+	loopbackConn *net.UDPConn // 127.0.0.1:18902
+	upstreamConn *net.UDPConn // 0.0.0.0:ephemeral
+	upstream     *net.UDPAddr // server's UDP host:port
+
+	pluginAddrMu sync.RWMutex
+	pluginAddr   *net.UDPAddr
+}
+
+func newUDPProxy(log *slog.Logger, listenAddr, upstreamAddr string) (*udpProxy, error) {
+	la, err := net.ResolveUDPAddr("udp", listenAddr)
+	if err != nil {
+		return nil, fmt.Errorf("resolve listen %s: %w", listenAddr, err)
+	}
+	ua, err := net.ResolveUDPAddr("udp", upstreamAddr)
+	if err != nil {
+		return nil, fmt.Errorf("resolve upstream %s: %w", upstreamAddr, err)
+	}
+	loopback, err := net.ListenUDP("udp", la)
+	if err != nil {
+		return nil, fmt.Errorf("listen loopback %s: %w", listenAddr, err)
+	}
+	upstreamConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	if err != nil {
+		_ = loopback.Close()
+		return nil, fmt.Errorf("listen upstream socket: %w", err)
+	}
+	for _, c := range []*net.UDPConn{loopback, upstreamConn} {
+		_ = c.SetReadBuffer(4 * 1024 * 1024)
+		_ = c.SetWriteBuffer(4 * 1024 * 1024)
+	}
+
+	p := &udpProxy{
+		log:          log,
+		loopbackConn: loopback,
+		upstreamConn: upstreamConn,
+		upstream:     ua,
+	}
+	go p.loopFromPlugin()
+	go p.loopFromUpstream()
+	return p, nil
+}
+
+// loopFromPlugin reads loopback UDP from the plugin, captures its source
+// address, and forwards to the upstream server via upstreamConn.
+func (p *udpProxy) loopFromPlugin() {
+	buf := make([]byte, udpDatagramMax)
+	for {
+		n, src, err := p.loopbackConn.ReadFromUDP(buf)
+		if err != nil {
+			if !errIsUseOfClosed(err) {
+				p.log.Debug("udp loopback read error", "err", err)
+			}
+			return
+		}
+		p.pluginAddrMu.Lock()
+		p.pluginAddr = src
+		p.pluginAddrMu.Unlock()
+
+		if _, err := p.upstreamConn.WriteToUDP(buf[:n], p.upstream); err != nil {
+			p.log.Debug("udp upstream write error", "err", err)
+		}
+	}
+}
+
+// loopFromUpstream reads the upstream socket; any packet that arrives is
+// assumed to be a reply from the server (the only thing we ever wrote to
+// is the upstream UDP endpoint). Forward back to the plugin's last seen
+// address.
+func (p *udpProxy) loopFromUpstream() {
+	buf := make([]byte, udpDatagramMax)
+	for {
+		n, _, err := p.upstreamConn.ReadFromUDP(buf)
+		if err != nil {
+			if !errIsUseOfClosed(err) {
+				p.log.Debug("udp upstream read error", "err", err)
+			}
+			return
+		}
+		p.pluginAddrMu.RLock()
+		dst := p.pluginAddr
+		p.pluginAddrMu.RUnlock()
+		if dst == nil {
+			continue // server reply before plugin ever sent anything; drop
+		}
+		if _, err := p.loopbackConn.WriteToUDP(buf[:n], dst); err != nil {
+			p.log.Debug("udp loopback write error", "err", err)
+		}
+	}
+}
+
+func (p *udpProxy) close() {
+	if p.loopbackConn != nil {
+		_ = p.loopbackConn.Close()
+	}
+	if p.upstreamConn != nil {
+		_ = p.upstreamConn.Close()
+	}
+}
+
+// errIsUseOfClosed checks for the "use of closed network connection" error.
+func errIsUseOfClosed(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Best-effort string match; net package does not export the sentinel.
+	return err.Error() == "use of closed network connection" ||
+		(net.ErrClosed != nil && err == net.ErrClosed)
+}
 
 func main() {
 	listen := flag.String("listen", "127.0.0.1:18900",
-		"Local address to accept plugin connections on (loopback only by default)")
+		"Local address to accept plugin connections on")
 	upstream := flag.String("upstream", "ws://146.56.202.138:18900",
 		"Remote Network Ultra Server URL")
+	udpListen := flag.String("udp-listen", "127.0.0.1:18902",
+		"Local UDP address the plugin sends audio to")
 	logLevel := flag.String("log-level", "info", "debug | info | warn | error")
 	flag.Parse()
 
 	log := setupLogger(*logLevel)
-	log.Info("starting", "listen", *listen, "upstream", *upstream)
+	log.Info("starting", "ws-listen", *listen, "udp-listen", *udpListen, "upstream", *upstream)
+
+	// Spin up the UDP proxy first; it shares the lifetime of the bridge process.
+	upstreamHost := extractHostFromWsURL(*upstream)
+	upstreamUDP := net.JoinHostPort(extractBareHost(upstreamHost),
+		strconv.Itoa(udpUpstreamPort))
+	uproxy, err := newUDPProxy(log, *udpListen, upstreamUDP)
+	if err != nil {
+		log.Error("udp proxy init failed", "err", err)
+		os.Exit(2)
+	}
+	defer uproxy.close()
+	log.Info("udp proxy live", "loopback", *udpListen, "upstream", upstreamUDP)
+
+	// Rewrite welcome's udpEndpoint to point at our local UDP listener.
+	udpAdvertise := *udpListen
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		handlePlugin(r.Context(), w, r, *upstream, log)
+		handlePlugin(r.Context(), w, r, *upstream, udpAdvertise, log)
 	})
 
 	srv := &http.Server{
 		Addr:        *listen,
 		Handler:     mux,
-		ReadTimeout: 0, // long-lived
+		ReadTimeout: 0,
 		IdleTimeout: 120 * time.Second,
 	}
 
 	errCh := make(chan error, 1)
-	go func() {
-		errCh <- srv.ListenAndServe()
-	}()
+	go func() { errCh <- srv.ListenAndServe() }()
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
@@ -88,7 +243,8 @@ func main() {
 	log.Info("bye")
 }
 
-func handlePlugin(parent context.Context, w http.ResponseWriter, r *http.Request, upstreamURL string, log *slog.Logger) {
+func handlePlugin(parent context.Context, w http.ResponseWriter, r *http.Request,
+	upstreamURL, udpAdvertise string, log *slog.Logger) {
 	plugin, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		InsecureSkipVerify: true,
 		Subprotocols:       []string{subprotocol},
@@ -98,28 +254,17 @@ func handlePlugin(parent context.Context, w http.ResponseWriter, r *http.Request
 		return
 	}
 	defer plugin.Close(websocket.StatusInternalError, "shutting down")
-	plugin.SetReadLimit(8 * 1024 * 1024) // generous: audio frames + control
+	plugin.SetReadLimit(8 * 1024 * 1024)
 
 	log.Info("plugin connected", "remote", r.RemoteAddr)
 
 	dialCtx, dialCancel := context.WithTimeout(parent, upstreamDialTimeout)
 	defer dialCancel()
 
-	// Bypass any HTTP_PROXY / HTTPS_PROXY env vars: Clash and other tunnels
-	// often intercept arbitrary ports and break custom WebSocket protocols.
 	directHTTP := &http.Client{
-		Transport: &http.Transport{
-			Proxy: nil, // explicitly disable proxy
-		},
+		Transport: &http.Transport{Proxy: nil},
 	}
 
-	// IMPORTANT: explicitly set the HTTP Host header to the upstream's
-	// host:port. The plugin connects to us at 127.0.0.1:18900, so without
-	// this override the WebSocket handshake to the real server would carry
-	// Host: 127.0.0.1:18900 — which the server uses to derive the UDP
-	// endpoint to advertise back. Setting it correctly means the server
-	// returns the real public IP+port, and the plugin's UDP client can
-	// reach it.
 	upstreamHost := extractHostFromWsURL(upstreamURL)
 	dialHeaders := http.Header{}
 	if upstreamHost != "" {
@@ -145,16 +290,21 @@ func handlePlugin(parent context.Context, w http.ResponseWriter, r *http.Request
 	relayCtx, relayCancel := context.WithCancel(parent)
 	defer relayCancel()
 
+	// Welcome interceptor: only the upstream→plugin direction needs JSON
+	// rewriting (welcome travels server→client). Plugin→upstream is plain
+	// byte-for-byte relay.
+	var sniffOnce atomic.Bool
+
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		relay(relayCtx, "plugin->upstream", plugin, upstream, log)
+		relayPassthrough(relayCtx, "plugin->upstream", plugin, upstream, log)
 		relayCancel()
 	}()
 	go func() {
 		defer wg.Done()
-		relay(relayCtx, "upstream->plugin", upstream, plugin, log)
+		relayWithRewrite(relayCtx, "upstream->plugin", upstream, plugin, udpAdvertise, &sniffOnce, log)
 		relayCancel()
 	}()
 	wg.Wait()
@@ -162,9 +312,8 @@ func handlePlugin(parent context.Context, w http.ResponseWriter, r *http.Request
 	log.Info("session closed", "remote", r.RemoteAddr)
 }
 
-// relay copies WebSocket messages from src to dst until either side closes.
-// We use Reader/Writer to avoid double-buffering large audio frames.
-func relay(ctx context.Context, dir string, src, dst *websocket.Conn, log *slog.Logger) {
+// relayPassthrough copies WS messages src→dst with no rewriting.
+func relayPassthrough(ctx context.Context, dir string, src, dst *websocket.Conn, log *slog.Logger) {
 	for {
 		mt, r, err := src.Reader(ctx)
 		if err != nil {
@@ -190,22 +339,85 @@ func relay(ctx context.Context, dir string, src, dst *websocket.Conn, log *slog.
 	}
 }
 
-// extractHostFromWsURL pulls "host:port" out of "ws://host:port/path".
-// Returns empty string on parse failure (caller falls back to default Host
-// behaviour, which is fine when the URL is malformed).
+// relayWithRewrite copies WS messages src→dst, but for the first text frame
+// containing a `welcome` envelope it rewrites the `udpEndpoint` field to
+// `udpAdvertise` so the plugin opens its UDP socket against us, not against
+// the real server. After the first welcome we degrade to passthrough.
+func relayWithRewrite(ctx context.Context, dir string, src, dst *websocket.Conn,
+	udpAdvertise string, sniffOnce *atomic.Bool, log *slog.Logger) {
+	for {
+		mt, payload, err := src.Read(ctx)
+		if err != nil {
+			if ctx.Err() == nil {
+				log.Debug(dir+" read closed", "err", err)
+			}
+			return
+		}
+
+		if mt == websocket.MessageText && !sniffOnce.Load() {
+			if rewritten, ok := maybeRewriteWelcome(payload, udpAdvertise); ok {
+				payload = rewritten
+				sniffOnce.Store(true)
+				log.Info("welcome udpEndpoint rewritten", "advertise", udpAdvertise)
+			}
+		}
+
+		if err := dst.Write(ctx, mt, payload); err != nil {
+			log.Debug(dir+" write failed", "err", err)
+			return
+		}
+	}
+}
+
+// maybeRewriteWelcome decodes the JSON envelope; if it's a welcome with a
+// non-empty udpEndpoint, replaces it with udpAdvertise. Returns the
+// (possibly modified) payload and a bool telling the caller if rewriting
+// happened.
+func maybeRewriteWelcome(payload []byte, udpAdvertise string) ([]byte, bool) {
+	// Use map[string]any to keep all unknown fields verbatim.
+	var env map[string]any
+	if err := json.Unmarshal(payload, &env); err != nil {
+		return payload, false
+	}
+	if t, _ := env["type"].(string); t != "welcome" {
+		return payload, false
+	}
+	data, ok := env["data"].(map[string]any)
+	if !ok {
+		return payload, false
+	}
+	ep, _ := data["udpEndpoint"].(string)
+	if ep == "" {
+		return payload, false
+	}
+	data["udpEndpoint"] = udpAdvertise
+	out, err := json.Marshal(env)
+	if err != nil {
+		return payload, false
+	}
+	return out, true
+}
+
 func extractHostFromWsURL(wsURL string) string {
 	u, err := url.Parse(wsURL)
 	if err != nil || u.Host == "" {
 		return ""
 	}
-	// websocket.Dial accepts ws:// and wss://; the Host on the URL is
-	// "host:port" or just "host" (default port). Either is fine for the
-	// HTTP Host header.
 	return u.Host
 }
 
-// suppress unused-import warning for strings if we ever drop the use.
-var _ = strings.TrimSpace
+// extractBareHost strips the ":port" suffix from "host:port" — used to
+// build the upstream UDP address (which uses a fixed port, not the WS port).
+func extractBareHost(hostPort string) string {
+	if hostPort == "" {
+		return ""
+	}
+	h, _, err := net.SplitHostPort(hostPort)
+	if err != nil {
+		return hostPort
+	}
+	return h
+}
 
 func setupLogger(level string) *slog.Logger {
 	var lvl slog.Level
@@ -224,11 +436,13 @@ func setupLogger(level string) *slog.Logger {
 }
 
 func init() {
-	// Make sure usage line is informative.
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr,
-			"network-ultra-bridge: local relay for DAW hosts whose outbound is firewalled.\n\n")
+			"network-ultra-bridge: local WS+UDP relay for firewalled DAW hosts.\n\n")
 		fmt.Fprintf(os.Stderr, "Usage:\n  %s [flags]\n\nFlags:\n", os.Args[0])
 		flag.PrintDefaults()
 	}
 }
+
+// Suppress unused-port-constant warning if only one of them ends up referenced.
+var _ = udpListenPort

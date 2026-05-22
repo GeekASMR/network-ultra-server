@@ -4,6 +4,12 @@
 #   curl -fsSL https://raw.githubusercontent.com/GeekASMR/network-ultra-server/main/scripts/install-from-source.sh | sudo bash
 set -euo pipefail
 
+# Pin cwd to /tmp so later `rm -rf $SRC_DIR` doesn't yank the shell's cwd out
+# from under us. (Happens when the user happens to be sitting in
+# /opt/network-ultra-src when re-running the installer — `git clone` then
+# fatals with "Unable to read current working directory".)
+cd /tmp
+
 REPO_URL="https://github.com/GeekASMR/network-ultra-server.git"
 SRC_DIR="/opt/network-ultra-src"
 BIN_PATH="/usr/local/bin/network-ultra-server"

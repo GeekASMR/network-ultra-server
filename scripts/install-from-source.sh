@@ -91,8 +91,24 @@ if [[ -d "$SRC_DIR/.git" ]]; then
   echo "  已更新 $SRC_DIR 到最新版本"
 else
   rm -rf "$SRC_DIR"
-  git clone --depth 1 "$REPO_URL" "$SRC_DIR"
-  echo "  已克隆到 $SRC_DIR"
+  mkdir -p "$SRC_DIR"
+  # Try git clone first (gives us .git for future incremental updates), but
+  # fall back to a plain tar.gz from the GitHub release CDN if git is slow
+  # or blocked. Many CN ISPs throttle git protocol while letting HTTPS to
+  # codeload.github.com pass freely.
+  if timeout 30 git clone --depth 1 "$REPO_URL" "$SRC_DIR" 2>/dev/null; then
+    echo "  已克隆到 $SRC_DIR (git)"
+  else
+    echo "  git clone 慢/超时,改走 tar.gz CDN..."
+    rm -rf "$SRC_DIR"
+    mkdir -p "$SRC_DIR"
+    curl -fsSL --max-time 60 \
+      "https://github.com/GeekASMR/network-ultra-server/archive/refs/heads/main.tar.gz" \
+      -o /tmp/network-ultra-src.tar.gz
+    tar xzf /tmp/network-ultra-src.tar.gz -C "$SRC_DIR" --strip-components=1
+    rm -f /tmp/network-ultra-src.tar.gz
+    echo "  已解压到 $SRC_DIR (tar.gz)"
+  fi
 fi
 
 step "4/7" "下载依赖并编译"

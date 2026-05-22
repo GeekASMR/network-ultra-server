@@ -128,6 +128,46 @@ echo "  二进制大小 $(ls -lh $BIN_PATH | awk '{print $5}'),已写入 $BIN_PA
 step "5/7" "生成配置文件"
 mkdir -p "$CFG_DIR"
 ADMIN_TOKEN=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | xxd -p -c 64)
+
+# 服务器连接密码(v1.3+)。所有连进来的 VST 客户端都要在 hello 中携带匹配的密码。
+# 留空 = 兼容旧客户端、任何人都能连。
+# 优先级:
+#   1. 命令行环境变量 NU_SERVER_PASSWORD (无人值守安装专用)
+#   2. 已有 config.toml 中的现存值 (升级保留)
+#   3. 交互输入 (默认随机生成 12 字符)
+#   4. 用户按回车跳过 = 公开服务器
+EXISTING_PWD=""
+if [[ -f "$CFG_FILE" ]]; then
+  EXISTING_PWD=$(awk -F\" '/^password[[:space:]]*=/ {print $2; exit}' "$CFG_FILE" 2>/dev/null || echo "")
+fi
+if [[ -n "${NU_SERVER_PASSWORD:-}" ]]; then
+  SERVER_PWD="$NU_SERVER_PASSWORD"
+  echo "  已从环境变量读取服务器密码 (NU_SERVER_PASSWORD)"
+elif [[ -n "$EXISTING_PWD" ]]; then
+  SERVER_PWD="$EXISTING_PWD"
+  echo "  保留 $CFG_FILE 中已有的服务器密码"
+else
+  RAND_PWD=$(openssl rand -base64 9 2>/dev/null | tr -d '/+=' | head -c 12 || head -c 9 /dev/urandom | base64 | tr -d '/+=' | head -c 12)
+  if [[ -t 0 ]]; then
+    # 交互式终端:让用户决定
+    echo ""
+    c_blu "  设置服务器密码(只有知道密码的客户端才能连接):"
+    echo "    ① 直接回车 = 使用建议的随机密码 [$RAND_PWD]"
+    echo "    ② 输入 'open' = 不设密码,任何人都能连"
+    echo "    ③ 直接输入你想用的密码"
+    read -r -p "  > " USER_INPUT < /dev/tty || USER_INPUT=""
+    case "$USER_INPUT" in
+      "")     SERVER_PWD="$RAND_PWD" ;;
+      "open") SERVER_PWD="" ;;
+      *)      SERVER_PWD="$USER_INPUT" ;;
+    esac
+  else
+    # 非交互(管道安装):默认随机密码
+    SERVER_PWD="$RAND_PWD"
+    echo "  非交互模式,使用随机密码"
+  fi
+fi
+
 if [[ -f "$CFG_FILE" ]]; then
   echo "  $CFG_FILE 已存在,保留原配置不覆盖。"
 else
@@ -139,6 +179,7 @@ max_rooms = 50
 max_peers_per_room = 8
 max_connections = 200
 admin_token = "${ADMIN_TOKEN}"
+password = "${SERVER_PWD}"
 
 [tls]
 enabled = false
@@ -220,6 +261,24 @@ $(c_grn "  Network Ultra Server 已成功启动")
   在 VST 插件里填入服务器地址:
     $(c_blu "ws://${PUB_IP}:18900")
 
+EOF
+if [[ -n "${SERVER_PWD:-}" ]]; then
+cat <<EOF
+  $(c_grn "服务器密码(分发给信任的客户端):")
+    $(c_blu "${SERVER_PWD}")
+
+  客户端在"服务器密码"栏填入此值才能连接。
+  改密码:编辑 $CFG_FILE 的 password = "...",然后 systemctl restart network-ultra-server
+
+EOF
+else
+cat <<EOF
+  $(c_blu "(此服务器未设置密码,任何人都能连接)")
+  设置密码:编辑 $CFG_FILE 的 password = "你的密码",然后 systemctl restart network-ultra-server
+
+EOF
+fi
+cat <<EOF
   Admin Token(已写入 $CFG_FILE):
     ${ADMIN_TOKEN}
 

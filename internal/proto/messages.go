@@ -38,18 +38,21 @@ const (
 
 // Error codes (v1)
 const (
-	ErrRoomNameTaken   = "ROOM_NAME_TAKEN"
-	ErrRoomNotFound    = "ROOM_NOT_FOUND"
-	ErrRoomFull        = "ROOM_FULL"
-	ErrServerFull      = "SERVER_FULL"
-	ErrBadPassword     = "BAD_PASSWORD"
-	ErrBadUsername     = "BAD_USERNAME"
-	ErrRateLimited     = "RATE_LIMITED"
-	ErrProtocolError   = "PROTOCOL_ERROR"
-	ErrInternalError   = "INTERNAL_ERROR"
-	ErrNotInRoom       = "NOT_IN_ROOM"
-	ErrAlreadyInRoom   = "ALREADY_IN_ROOM"
-	ErrUnsupportedVer  = "UNSUPPORTED_VERSION"
+	ErrRoomNameTaken         = "ROOM_NAME_TAKEN"
+	ErrRoomNotFound          = "ROOM_NOT_FOUND"
+	ErrRoomFull              = "ROOM_FULL"
+	ErrServerFull            = "SERVER_FULL"
+	ErrBadPassword           = "BAD_PASSWORD"
+	ErrBadUsername           = "BAD_USERNAME"
+	ErrRateLimited           = "RATE_LIMITED"
+	ErrProtocolError         = "PROTOCOL_ERROR"
+	ErrInternalError         = "INTERNAL_ERROR"
+	ErrNotInRoom             = "NOT_IN_ROOM"
+	ErrAlreadyInRoom         = "ALREADY_IN_ROOM"
+	ErrUnsupportedVer        = "UNSUPPORTED_VERSION"
+	// v1.3+ server-level password gating
+	ErrServerPasswordRequired = "SERVER_PASSWORD_REQUIRED"
+	ErrBadServerPassword      = "BAD_SERVER_PASSWORD"
 )
 
 // Envelope is the outer JSON structure shared by all control messages.
@@ -63,9 +66,10 @@ type Envelope struct {
 // ----- Client -> Server payloads -----
 
 type HelloData struct {
-	Username string `json:"username"`
-	Client   string `json:"client"`
-	Platform string `json:"platform"`
+	Username       string `json:"username"`
+	Client         string `json:"client"`
+	Platform       string `json:"platform"`
+	ServerPassword string `json:"serverPassword,omitempty"` // v1.3+
 }
 
 type RoomCreateData struct {

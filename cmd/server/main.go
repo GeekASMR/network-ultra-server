@@ -20,6 +20,8 @@ import (
 	"github.com/GeekASMR/network-ultra-server/internal/room"
 	udpserver "github.com/GeekASMR/network-ultra-server/internal/udp"
 	"github.com/GeekASMR/network-ultra-server/internal/ws"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 const (
@@ -60,6 +62,19 @@ func main() {
 		Log:            log,
 		MaxConnections: cfg.Server.MaxConnections,
 		Subprotocol:    "network-ultra-v1",
+	}
+
+	// Server-level password gating (v1.3+). When set in config, hash it once
+	// at startup so per-connection bcrypt compares are the only crypto cost.
+	// Empty config.Server.Password = open server (legacy).
+	if cfg.Server.Password != "" {
+		hash, err := bcrypt.GenerateFromPassword([]byte(cfg.Server.Password), bcrypt.DefaultCost)
+		if err != nil {
+			log.Error("hash server password failed", "err", err)
+			os.Exit(1)
+		}
+		wsServer.ServerPasswordHash = hash
+		log.Info("server password gating enabled (clients must supply matching password in hello)")
 	}
 
 	// UDP data plane (optional). When configured, the WS welcome will

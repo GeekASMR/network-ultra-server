@@ -24,6 +24,14 @@ type ServerCfg struct {
 	MaxPeersPerRoom int    `toml:"max_peers_per_room"`
 	MaxConnections  int    `toml:"max_connections"`
 	AdminToken      string `toml:"admin_token"`
+
+	// Server-level connection password (v1.3+).
+	// Empty = no server-level gating (anyone who knows the address can connect).
+	// Non-empty = clients must include serverPassword in their hello message;
+	// otherwise server replies with SERVER_PASSWORD_REQUIRED / BAD_SERVER_PASSWORD.
+	// Stored as plaintext at rest (config.toml is root-only on systemd hosts);
+	// hashed in memory on load and only the bcrypt hash is compared per-connection.
+	Password string `toml:"password"`
 }
 
 type TLSCfg struct {

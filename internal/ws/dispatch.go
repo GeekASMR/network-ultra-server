@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/coder/websocket"
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/GeekASMR/network-ultra-server/internal/metrics"
 	"github.com/GeekASMR/network-ultra-server/internal/proto"
@@ -37,6 +38,12 @@ type Server struct {
 
 	// Optional: the WS subprotocol clients must request.
 	Subprotocol string
+
+	// Server-level password gating (v1.3+). When non-nil, clients must
+	// include a matching serverPassword in their hello message. When nil,
+	// the server is open (legacy behaviour). Stored only as bcrypt hash;
+	// derived from config.Server.Password at startup.
+	ServerPasswordHash []byte
 
 	// UDP data plane advertisement. Empty UdpEndpoint means UDP is disabled
 	// (Udp may still be set so DetachPeer is a no-op for code symmetry).
@@ -145,6 +152,21 @@ func (s *Server) run(parent context.Context, conn *Conn, remote, hostHeader stri
 	if !validUsername(hello.Username) {
 		s.sendError(conn, env.ID, proto.ErrBadUsername, "username invalid")
 		return errors.New("bad username")
+	}
+
+	// v1.3+ server-level password gating. Empty hash = open server (legacy).
+	// Empty client-supplied password against a non-empty hash => "required".
+	// Wrong client-supplied password against a non-empty hash => "bad".
+	if len(s.ServerPasswordHash) > 0 {
+		if hello.ServerPassword == "" {
+			s.sendError(conn, env.ID, proto.ErrServerPasswordRequired,
+				"this server requires a password; please set it in the client and reconnect")
+			return errors.New("server password required")
+		}
+		if err := bcrypt.CompareHashAndPassword(s.ServerPasswordHash, []byte(hello.ServerPassword)); err != nil {
+			s.sendError(conn, env.ID, proto.ErrBadServerPassword, "bad server password")
+			return errors.New("bad server password")
+		}
 	}
 
 	peer := room.NewPeer(hello.Username, "")

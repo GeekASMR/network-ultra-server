@@ -93,26 +93,17 @@ if command -v iptables >/dev/null 2>&1; then
   fi
 fi
 
-# 如果 config.toml 里没有 udp_advertise_host，加上 — 否则服务器会下发
-# 0.0.0.0:18902 给客户端，客户端无法连。用本机第一个外网 IP 作默认值。
+# 不再需要写 udp_advertise_host：v1.2 服务端会根据客户端连进来的 HTTP Host
+# 自动推导 UDP endpoint（这样云服务器不用关心自己的公网 IP，client 用什么
+# 地址连进来就用什么地址回应）。如果之前的版本写了一个错的 udp_advertise_host
+# （比如内网 IP），把它清掉以免覆盖自动推导。
 CONF=/etc/network-ultra/config.toml
-if [[ -f "$CONF" ]] && ! grep -q '^udp_advertise_host' "$CONF"; then
-  PUBLIC_IP="$(hostname -I | awk '{print $1}')"
-  if [[ -n "$PUBLIC_IP" ]]; then
-    # 在 [server] section 末尾追加。如果没 [server] 段就什么都不动；
-    # 这种情况说明用户用了非默认 config，让他自己加。
-    awk -v ip="$PUBLIC_IP" '
-      /^\[server\]/ { in_server=1 }
-      /^\[/ && !/^\[server\]/ && in_server {
-        print "udp_advertise_host = \"" ip "\""
-        in_server=0
-      }
-      { print }
-      END {
-        if (in_server) print "udp_advertise_host = \"" ip "\""
-      }
-    ' "$CONF" > "$CONF.new" && mv "$CONF.new" "$CONF"
-    echo "  config.toml 已加 udp_advertise_host = \"$PUBLIC_IP\""
+if [[ -f "$CONF" ]] && grep -q '^udp_advertise_host' "$CONF"; then
+  HOST_VAL=$(grep '^udp_advertise_host' "$CONF" | head -1 | awk -F'"' '{print $2}')
+  # 如果是 10.x / 172.16-31.x / 192.168.x 内网 IP，直接清掉
+  if [[ "$HOST_VAL" =~ ^10\. ]] || [[ "$HOST_VAL" =~ ^172\.(1[6-9]|2[0-9]|3[01])\. ]] || [[ "$HOST_VAL" =~ ^192\.168\. ]]; then
+    sed -i '/^udp_advertise_host/d' "$CONF"
+    echo "  config.toml 删除内网 IP 的 udp_advertise_host = \"$HOST_VAL\"（v1.2 自动推导）"
   fi
 fi
 

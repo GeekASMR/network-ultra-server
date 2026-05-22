@@ -74,9 +74,24 @@ func main() {
 		} else {
 			defer udpSrv.Close()
 			wsServer.Udp = udpSrv
-			wsServer.UdpEndpoint = resolveUdpEndpoint(cfg.Server.UdpListen,
-				cfg.Server.UdpAdvertiseHost)
-			log.Info("udp data plane enabled", "advertise", wsServer.UdpEndpoint)
+			// Two ways to tell clients where to send UDP:
+			//   1. Static UdpEndpoint (admin override; only useful behind
+			//      a load-balancer / CDN where the public host differs).
+			//   2. Derive from the HTTP Host the client used. This is the
+			//      default and handles cloud-NAT correctly without the
+			//      operator needing to figure out their public IP.
+			udpPort := udpPortFromListen(cfg.Server.UdpListen)
+			wsServer.UdpPort = udpPort
+			if cfg.Server.UdpAdvertiseHost != "" && udpPort > 0 {
+				wsServer.UdpEndpoint = net.JoinHostPort(
+					cfg.Server.UdpAdvertiseHost,
+					strconv.Itoa(udpPort))
+				log.Info("udp data plane enabled", "advertise", wsServer.UdpEndpoint)
+			} else {
+				log.Info("udp data plane enabled",
+					"port", udpPort,
+					"advertise", "auto-derive from HTTP Host")
+			}
 		}
 	}
 
@@ -144,34 +159,25 @@ func main() {
 	log.Info("bye")
 }
 
-// resolveUdpEndpoint computes the "host:port" string we advertise to clients
-// in the WS welcome message.
-//
-//   listen        e.g. "0.0.0.0:18902"  → bind addr (port is what matters)
-//   advertise     e.g. "175.178.62.76"  → host advertised; empty = derive
-//
-// If advertise is empty we fall back to the listen host. If the listen host
-// is "0.0.0.0" or empty we leave the advertised endpoint blank — the client
-// will then know UDP is disabled and fall back to WS. Production deployments
-// should set udp_advertise_host explicitly to the public IP/hostname.
-func resolveUdpEndpoint(listen, advertise string) string {
+// udpPortFromListen extracts the port number from a listen address like
+// "0.0.0.0:18902" or ":18902". Returns 0 on parse failure.
+func udpPortFromListen(listen string) int {
 	_, port, err := net.SplitHostPort(listen)
-	if err != nil || port == "" {
-		return ""
+	if err != nil {
+		return 0
 	}
-	if advertise == "" {
-		host, _, _ := net.SplitHostPort(listen)
-		if host == "" || host == "0.0.0.0" || host == "::" {
-			return ""
-		}
-		advertise = host
+	n, err := strconv.Atoi(port)
+	if err != nil {
+		return 0
 	}
-	// Validate port is numeric (sanity).
-	if _, err := strconv.Atoi(port); err != nil {
-		return ""
-	}
-	return net.JoinHostPort(advertise, port)
+	return n
 }
+
+// resolveUdpEndpoint is unused now; UDP endpoint advertisement happens
+// per-connection in ws.dispatch.go using r.Host (the HTTP Host header)
+// so cloud-NAT'd servers don't need to figure out their public IP. Kept
+// only as a stub so older callers (none in this binary) compile.
+var _ = func() string { return "" }
 
 func setupLogger(c config.LogCfg) *slog.Logger {
 	var level slog.Level

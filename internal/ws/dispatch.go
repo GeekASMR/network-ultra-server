@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -40,6 +41,12 @@ type Server struct {
 	// UDP data plane advertisement. Empty UdpEndpoint means UDP is disabled
 	// (Udp may still be set so DetachPeer is a no-op for code symmetry).
 	UdpEndpoint string
+
+	// UDP port the data plane listens on. When non-zero AND UdpEndpoint is
+	// empty, the welcome message advertises {host-from-http-Host}:UdpPort,
+	// which works correctly behind cloud NAT where the server has no idea
+	// what its public hostname is.
+	UdpPort int
 
 	// UDP data plane (optional). When set, the WS welcome message advertises
 	// the UDP endpoint + a per-peer HMAC token; clients that successfully
@@ -100,13 +107,18 @@ func (s *Server) HandleHTTP(w http.ResponseWriter, r *http.Request) {
 	conn := newConn(c, s.Log)
 	defer conn.close()
 
-	if err := s.run(r.Context(), conn, r.RemoteAddr); err != nil {
+	if err := s.run(r.Context(), conn, r.RemoteAddr, r.Host); err != nil {
 		s.Log.Debug("session ended", "err", err, "remote", r.RemoteAddr)
 	}
 }
 
 // run drives a single WS session: hello → loop dispatching messages.
-func (s *Server) run(parent context.Context, conn *Conn, remote string) error {
+//
+// hostHeader is the HTTP Host the client used to reach us (e.g.
+// "175.178.62.76:18900"). We use just the host part to advertise the UDP
+// endpoint, so clients connecting via "localhost", "127.0.0.1", a public
+// IP, or a domain all get back a UDP host they can actually reach.
+func (s *Server) run(parent context.Context, conn *Conn, remote, hostHeader string) error {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 
@@ -154,9 +166,30 @@ func (s *Server) run(parent context.Context, conn *Conn, remote string) error {
 		PeerID:        peer.ID.String(),
 		ServerVersion: serverVersion,
 	}
-	if s.Udp != nil && s.UdpEndpoint != "" {
-		welcome.UdpEndpoint = s.UdpEndpoint
-		welcome.UdpToken = s.Udp.MintToken(peer.ID)
+	if s.Udp != nil {
+		// Resolve the UDP endpoint to advertise. Priority:
+		//   1. Explicit UdpEndpoint config (admin override; rare).
+		//   2. Derive from the HTTP Host the client used to connect — this
+		//      is the most reliable, because the client by definition can
+		//      reach that host on at least the WS port. We just swap the
+		//      port to the UDP port.
+		// This avoids the cloud-server gotcha where `hostname -I` returns
+		// an internal IP (e.g. 10.x.x.x) that public clients can't reach.
+		if s.UdpEndpoint != "" {
+			welcome.UdpEndpoint = s.UdpEndpoint
+		} else if udpPort := s.UdpPort; udpPort > 0 && hostHeader != "" {
+			h, _, err := net.SplitHostPort(hostHeader)
+			if err != nil {
+				h = hostHeader // bare host, no port
+			}
+			if h != "" {
+				welcome.UdpEndpoint = net.JoinHostPort(h,
+					strconv.Itoa(udpPort))
+			}
+		}
+		if welcome.UdpEndpoint != "" {
+			welcome.UdpToken = s.Udp.MintToken(peer.ID)
+		}
 	}
 	if err := s.send(conn, proto.TypeWelcome, env.ID, welcome); err != nil {
 		return err

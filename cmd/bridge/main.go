@@ -25,8 +25,10 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -110,9 +112,25 @@ func handlePlugin(parent context.Context, w http.ResponseWriter, r *http.Request
 			Proxy: nil, // explicitly disable proxy
 		},
 	}
+
+	// IMPORTANT: explicitly set the HTTP Host header to the upstream's
+	// host:port. The plugin connects to us at 127.0.0.1:18900, so without
+	// this override the WebSocket handshake to the real server would carry
+	// Host: 127.0.0.1:18900 — which the server uses to derive the UDP
+	// endpoint to advertise back. Setting it correctly means the server
+	// returns the real public IP+port, and the plugin's UDP client can
+	// reach it.
+	upstreamHost := extractHostFromWsURL(upstreamURL)
+	dialHeaders := http.Header{}
+	if upstreamHost != "" {
+		dialHeaders.Set("Host", upstreamHost)
+	}
+
 	upstream, _, err := websocket.Dial(dialCtx, upstreamURL, &websocket.DialOptions{
 		Subprotocols: []string{subprotocol},
 		HTTPClient:   directHTTP,
+		HTTPHeader:   dialHeaders,
+		Host:         upstreamHost,
 	})
 	if err != nil {
 		log.Warn("upstream dial failed", "err", err, "url", upstreamURL)
@@ -171,6 +189,23 @@ func relay(ctx context.Context, dir string, src, dst *websocket.Conn, log *slog.
 		}
 	}
 }
+
+// extractHostFromWsURL pulls "host:port" out of "ws://host:port/path".
+// Returns empty string on parse failure (caller falls back to default Host
+// behaviour, which is fine when the URL is malformed).
+func extractHostFromWsURL(wsURL string) string {
+	u, err := url.Parse(wsURL)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	// websocket.Dial accepts ws:// and wss://; the Host on the URL is
+	// "host:port" or just "host" (default port). Either is fine for the
+	// HTTP Host header.
+	return u.Host
+}
+
+// suppress unused-import warning for strings if we ever drop the use.
+var _ = strings.TrimSpace
 
 func setupLogger(level string) *slog.Logger {
 	var lvl slog.Level

@@ -19,7 +19,9 @@
 
 - 一台 Linux 服务器（Ubuntu / Debian / CentOS / Alibaba / Tencent 都行）
 - 至少 1 核 1G 内存，30 Mbps 上传带宽够 2~3 人合奏
-- 服务器配置页面把 **入站 18900 端口** 放开（云防火墙/安全组）
+- 服务器配置页面把 **入站 18900 (TCP) 和 18902 (UDP) 端口** 都放开（云防火墙/安全组）
+  - TCP 18900：控制信令 + 音频兜底通道
+  - UDP 18902：音频主通道（v1.2+ 加入，避免 TCP head-of-line 阻塞）
 
 ### 一键安装
 
@@ -95,7 +97,7 @@ sudo bash -c 'rm -rf /opt/network-ultra-src && mkdir -p /opt/network-ultra-src &
 
 ### Q3：装完了，`ss -tlnp | grep 18900` 显示在监听，但外网连不上
 
-**原因 A — 云控制台安全组没放通**：腾讯云/阿里云/华为云在 web 控制台都有「云防火墙」或「安全组」配置，需要手动加入站规则放通 TCP 18900。
+**原因 A — 云控制台安全组没放通**：腾讯云/阿里云/华为云在 web 控制台都有「云防火墙」或「安全组」配置，需要手动加入站规则放通 **TCP 18900 + UDP 18902**（两个都要，UDP 是 v1.2+ 主音频通道）。
 
 **原因 B — 主机内核 iptables 拦了**（腾讯云轻量 / 阿里云 ECS 常见）：云盾 / YunJing 会注入 INPUT 规则。一行 flush：
 
@@ -172,7 +174,8 @@ audio_frames_per_peer_per_second = 200
 
 ## 端点
 
-- `ws://0.0.0.0:18900` — 客户端控制 + 音频
+- `ws://0.0.0.0:18900` — 客户端控制 + 音频兜底（TCP）
+- `udp://0.0.0.0:18902` — 音频主通道（v1.2+；客户端通过 welcome 自动协商）
 - `http://127.0.0.1:18901/healthz` — JSON 状态
 - `http://127.0.0.1:18901/metrics` — Prometheus 指标
 
@@ -190,10 +193,14 @@ curl http://127.0.0.1:18901/metrics
 
 - **控制消息**：WebSocket text frame，JSON UTF-8
   - `hello` / `welcome` / `room_create` / `room_join` / `room_left` / `peer_*` / `ping` / `pong` / `error`
-- **音频消息**：WebSocket binary frame
-  - 24 字节定长 header（type + sourcePeerId 16B + seq 2B + length 2B）+ payload
-  - 当前 payload = PCM 16-bit @ 48kHz / Stereo / 480 sample/帧（10ms/帧）
-  - 一帧约 1920 字节 + 24 头 = 1944 字节，~3 Mbps 单向
+  - `welcome` v1.2+ 携带 `udpEndpoint` + `udpToken`，客户端据此握手 UDP 数据面
+- **音频消息**：WebSocket binary frame **或** UDP datagram（v1.2+ 默认走 UDP）
+  - 24 字节定长 header（type + codec_id + sourcePeerId 16B + seq 2B + length 2B）+ payload
+  - codec_id：0=PCM / 1=FLAC / 2=Opus 192k / 3=Opus 128k(默认) / 4=Opus 64k
+  - PCM 一帧 1920 字节 + 24 头 ~ 3 Mbps，Opus 128k 一帧 ~256 字节，FLAC 一帧 ~700 字节
+- **UDP 数据面（v1.2+）**：客户端先 WS 握手取 token，然后用 token 在 UDP 18902 上 hello。
+  服务器绑定 source addr 后所有音频走 UDP，避免 TCP HOL 阻塞。
+  握手失败时自动回落到 WebSocket binary frame（兼容老服务器和受限网络）。
 
 服务器对 payload 完全不感知，只检查长度并 fan-out 给同房间其他 peer。
 

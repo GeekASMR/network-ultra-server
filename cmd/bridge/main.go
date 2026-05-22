@@ -187,32 +187,22 @@ func main() {
 		"Local address to accept plugin connections on")
 	upstream := flag.String("upstream", "ws://146.56.202.138:18900",
 		"Remote Network Ultra Server URL")
-	udpListen := flag.String("udp-listen", "127.0.0.1:18902",
-		"Local UDP address the plugin sends audio to")
 	logLevel := flag.String("log-level", "info", "debug | info | warn | error")
 	flag.Parse()
 
 	log := setupLogger(*logLevel)
-	log.Info("starting", "ws-listen", *listen, "udp-listen", *udpListen, "upstream", *upstream)
+	log.Info("starting", "ws-listen", *listen, "upstream", *upstream)
 
-	// Spin up the UDP proxy first; it shares the lifetime of the bridge process.
-	upstreamHost := extractHostFromWsURL(*upstream)
-	upstreamUDP := net.JoinHostPort(extractBareHost(upstreamHost),
-		strconv.Itoa(udpUpstreamPort))
-	uproxy, err := newUDPProxy(log, *udpListen, upstreamUDP)
-	if err != nil {
-		log.Error("udp proxy init failed", "err", err)
-		os.Exit(2)
-	}
-	defer uproxy.close()
-	log.Info("udp proxy live", "loopback", *udpListen, "upstream", upstreamUDP)
-
-	// Rewrite welcome's udpEndpoint to point at our local UDP listener.
-	udpAdvertise := *udpListen
+	// Each plugin connection gets its own UDP proxy (ephemeral loopback +
+	// upstream sockets), so multiple plugin instances on the same DAW —
+	// e.g. one Send, one Recv — can each have an independent UDP binding
+	// on the server. A single shared proxy would alias them: server would
+	// bind only the latest hello's source addr and the others would
+	// silently drop to WS fallback.
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		handlePlugin(r.Context(), w, r, *upstream, udpAdvertise, log)
+		handlePlugin(r.Context(), w, r, *upstream, log)
 	})
 
 	srv := &http.Server{
@@ -244,7 +234,7 @@ func main() {
 }
 
 func handlePlugin(parent context.Context, w http.ResponseWriter, r *http.Request,
-	upstreamURL, udpAdvertise string, log *slog.Logger) {
+	upstreamURL string, log *slog.Logger) {
 	plugin, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		InsecureSkipVerify: true,
 		Subprotocols:       []string{subprotocol},
@@ -258,6 +248,24 @@ func handlePlugin(parent context.Context, w http.ResponseWriter, r *http.Request
 
 	log.Info("plugin connected", "remote", r.RemoteAddr)
 
+	// Per-connection UDP proxy: ephemeral loopback port (we'll tell the
+	// plugin which one via the welcome rewrite) + ephemeral upstream
+	// socket so the server treats each plugin as a distinct source.
+	upstreamHost := extractHostFromWsURL(upstreamURL)
+	upstreamUDP := net.JoinHostPort(extractBareHost(upstreamHost),
+		strconv.Itoa(udpUpstreamPort))
+	uproxy, err := newUDPProxy(log, "127.0.0.1:0", upstreamUDP)
+	if err != nil {
+		log.Warn("udp proxy init failed", "err", err)
+		_ = plugin.Close(websocket.StatusInternalError, "udp proxy init")
+		return
+	}
+	defer uproxy.close()
+	udpAdvertise := uproxy.loopbackConn.LocalAddr().String()
+	log.Info("udp proxy live for plugin",
+		"plugin", r.RemoteAddr,
+		"loopback", udpAdvertise, "upstream", upstreamUDP)
+
 	dialCtx, dialCancel := context.WithTimeout(parent, upstreamDialTimeout)
 	defer dialCancel()
 
@@ -265,7 +273,6 @@ func handlePlugin(parent context.Context, w http.ResponseWriter, r *http.Request
 		Transport: &http.Transport{Proxy: nil},
 	}
 
-	upstreamHost := extractHostFromWsURL(upstreamURL)
 	dialHeaders := http.Header{}
 	if upstreamHost != "" {
 		dialHeaders.Set("Host", upstreamHost)
@@ -290,9 +297,6 @@ func handlePlugin(parent context.Context, w http.ResponseWriter, r *http.Request
 	relayCtx, relayCancel := context.WithCancel(parent)
 	defer relayCancel()
 
-	// Welcome interceptor: only the upstream→plugin direction needs JSON
-	// rewriting (welcome travels server→client). Plugin→upstream is plain
-	// byte-for-byte relay.
 	var sniffOnce atomic.Bool
 
 	var wg sync.WaitGroup

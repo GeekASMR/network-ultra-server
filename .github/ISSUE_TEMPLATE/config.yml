@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 部署 / 安装疑问
+    url: https://github.com/GeekASMR/network-ultra-server#-一键安装从源码编译
+    about: 优先看 README 的「一键安装」与「服务器密码设置 / 修改 / 找回」章节,大部分部署问题已在文档覆盖。
+  - name: 客户端 (VST3 插件) 问题
+    url: https://github.com/GeekASMR/network-ultra-server/releases/latest
+    about: 客户端代码闭源,bug 反馈请在对应 client release 的 Discussion 留言,或直接在本仓提 issue 时使用「客户端问题」模板。

@@ -1,0 +1,82 @@
+name: 🐛 服务端 Bug
+description: 服务端运行出错 / 协议异常 / 配置不生效
+title: "[Server] "
+labels: ["bug", "server", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提报前请先确认:
+        - 已是 v1.3+(密码 gating 是 v1.3 起的功能)
+        - `journalctl -u network-ultra-server -n 50` 拿到了启动日志
+        - 服务器和客户端版本号已对齐(server v1.3 ↔ client v1.3+)
+  - type: input
+    id: server_version
+    attributes:
+      label: 服务端版本
+      description: |
+        `network-ultra-server -version` 或者部署时记录的 git commit hash。
+      placeholder: "v1.3.0 / commit 32cc723 / 2026-05-23 build"
+    validations:
+      required: true
+  - type: input
+    id: client_version
+    attributes:
+      label: 客户端版本
+      placeholder: "v1.3.0 (Network_Ultra_v1.3.0_Setup.exe) / 不涉及"
+    validations:
+      required: true
+  - type: dropdown
+    id: deploy_mode
+    attributes:
+      label: 部署方式
+      options:
+        - "一键脚本 install-from-source.sh"
+        - "手动 git clone + go build"
+        - "Docker"
+        - "其他 (请在描述里说明)"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: 服务器系统
+      placeholder: "Ubuntu 22.04 / Debian 12 / CentOS 7 / 其他"
+    validations:
+      required: true
+  - type: textarea
+    id: what_happened
+    attributes:
+      label: 现象
+      description: 你做了什么 → 发生了什么 → 期望发生什么
+      placeholder: |
+        步骤:
+        1. ...
+        2. ...
+
+        实际:
+
+        期望:
+    validations:
+      required: true
+  - type: textarea
+    id: server_logs
+    attributes:
+      label: 服务端日志
+      description: |
+        `journalctl -u network-ultra-server -n 100 --no-pager` 的输出。
+        敏感信息(IP / 用户名)请自行打码。
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: config.toml (脱敏)
+      description: "`/etc/network-ultra-server/config.toml` 内容,请把 password 字段去掉。"
+      render: toml
+  - type: textarea
+    id: extra
+    attributes:
+      label: 其他
+      description: 网络拓扑 / 反向代理配置 / 自定义改动等

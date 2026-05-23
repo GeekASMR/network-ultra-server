@@ -1,0 +1,80 @@
+name: 🎛 客户端 Bug (VST3 / Bridge)
+description: VST3 插件 / network-ultra-bridge.exe 行为异常
+title: "[Client] "
+labels: ["bug", "client", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提报前请先确认:
+        - 已用 `Network_Ultra_v<ver>_Setup.exe` 安装(或解压 zip 时 bridge.exe 在 vst3 同目录)
+        - DAW 已重新扫描 VST3 插件列表
+        - 知道连接的目标服务器版本(老 v1.2 服务器 + 新 v1.3 客户端、或反过来,行为可能不同)
+  - type: input
+    id: client_version
+    attributes:
+      label: 客户端版本
+      placeholder: "v1.3.0 / Network_Ultra_v1.3.0_Setup.exe"
+    validations:
+      required: true
+  - type: input
+    id: server_version
+    attributes:
+      label: 服务器版本
+      description: 自建服务器或第三方服务器的版本号 / commit。
+      placeholder: "v1.3.0 / 用的是 ws://example.com:18900 第三方"
+    validations:
+      required: true
+  - type: input
+    id: daw
+    attributes:
+      label: DAW
+      placeholder: "Studio One 6.6.2 / Cubase 13 / Reaper 7.x / Other"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Windows 版本
+      placeholder: "Windows 11 23H2 / Windows 10 22H2"
+    validations:
+      required: true
+  - type: dropdown
+    id: plugin
+    attributes:
+      label: 出问题的插件
+      multiple: true
+      options:
+        - "Network Ultra (双向)"
+        - "VST2NET Ultra (仅发送)"
+        - "NET2VST Ultra (仅接收)"
+        - "network-ultra-bridge.exe"
+    validations:
+      required: true
+  - type: textarea
+    id: what_happened
+    attributes:
+      label: 现象
+      placeholder: |
+        步骤:
+        1. ...
+        2. ...
+
+        实际:
+
+        期望:
+    validations:
+      required: true
+  - type: textarea
+    id: bridge_health
+    attributes:
+      label: Bridge 健康状态
+      description: |
+        浏览器打开 `http://127.0.0.1:18900/healthz`,把返回的 JSON 贴上来。
+        没东西返回 = bridge 没启动 / 被防火墙拦了。
+      render: json
+  - type: textarea
+    id: extra
+    attributes:
+      label: 其他
+      description: 杀软 / 防火墙 / VPN / 网络环境(国内宽带 / 跨境 / IPv6) 等可能相关的信息

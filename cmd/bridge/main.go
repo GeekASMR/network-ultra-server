@@ -24,6 +24,15 @@
 //     plugin's most recent local UDP address. Because there's only one
 //     plugin per bridge instance, a single source-address binding is
 //     sufficient.
+//
+// Lifecycle:
+//   * On startup, if 127.0.0.1:18900 is already taken by another
+//     network-ultra-bridge.exe (stale orphan from a previous DAW session),
+//     we kill that process and reclaim the port. Refuses to kill any other
+//     process kind.
+//   * /healthz exposes upstream URL + pid + started timestamp + version
+//     so a fresh plugin connect can verify the bridge is healthy AND
+//     pointing at the right server before reusing it.
 package main
 
 import (
@@ -48,12 +57,21 @@ import (
 )
 
 const (
+	bridgeVersion       = "1.3.0"
 	subprotocol         = "network-ultra-v1"
 	upstreamDialTimeout = 15 * time.Second
 	udpListenPort       = 18902 // loopback UDP we expose to plugin
 	udpUpstreamPort     = 18902 // remote server UDP port (matches server config)
 	udpDatagramMax      = 9000
 )
+
+// startedAt is captured once and reported via /healthz so callers can tell
+// how long the bridge has been alive (useful for diagnosing stuck bridges).
+var startedAt = time.Now()
+
+// upstreamGlobal is set in main() and read by /healthz. Plain string is fine —
+// it never changes after startup.
+var upstreamGlobal string
 
 // udpProxy bridges plugin UDP traffic to the remote server.
 //
@@ -191,7 +209,28 @@ func main() {
 	flag.Parse()
 
 	log := setupLogger(*logLevel)
-	log.Info("starting", "ws-listen", *listen, "upstream", *upstream)
+	upstreamGlobal = *upstream
+	log.Info("starting", "version", bridgeVersion, "ws-listen", *listen, "upstream", *upstream)
+
+	// If the listen port is already taken, try to identify the holder. If
+	// it's a stale instance of network-ultra-bridge.exe (very common on
+	// Windows after a DAW crash), kill it and continue. Otherwise bail.
+	if !portIsFree(*listen) {
+		log.Warn("listen port busy, attempting to reclaim", "addr", *listen)
+		if err := reclaimPort(*listen, log); err != nil {
+			log.Error("port reclaim failed; refusing to start", "err", err, "addr", *listen)
+			os.Exit(2)
+		}
+		// Give Windows a moment to actually free the TCP socket after kill.
+		for i := 0; i < 20 && !portIsFree(*listen); i++ {
+			time.Sleep(100 * time.Millisecond)
+		}
+		if !portIsFree(*listen) {
+			log.Error("port still busy after reclaim attempt", "addr", *listen)
+			os.Exit(2)
+		}
+		log.Info("port reclaimed successfully", "addr", *listen)
+	}
 
 	// Each plugin connection gets its own UDP proxy (ephemeral loopback +
 	// upstream sockets), so multiple plugin instances on the same DAW —
@@ -201,7 +240,10 @@ func main() {
 	// silently drop to WS fallback.
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", handleHealthz)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// /healthz registered above takes precedence by net/http rules.
+		// Anything else is a WS upgrade attempt from the plugin.
 		handlePlugin(r.Context(), w, r, *upstream, log)
 	})
 
@@ -231,6 +273,23 @@ func main() {
 	defer cancel()
 	_ = srv.Shutdown(ctx)
 	log.Info("bye")
+}
+
+// handleHealthz responds with a small JSON snapshot used by the plugin to
+// decide whether the bridge is healthy and pointing at the right upstream.
+// Plain HTTP, no auth — bound to loopback only.
+func handleHealthz(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	resp := map[string]any{
+		"ok":        true,
+		"version":   bridgeVersion,
+		"pid":       os.Getpid(),
+		"upstream":  upstreamGlobal,
+		"startedAt": startedAt.UTC().Format(time.RFC3339),
+		"uptimeMs":  time.Since(startedAt).Milliseconds(),
+	}
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func handlePlugin(parent context.Context, w http.ResponseWriter, r *http.Request,

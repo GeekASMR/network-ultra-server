@@ -173,3 +173,25 @@ func (cn *Conn) Close() {
 	cn.close()
 	cn.wg.Wait()
 }
+
+// flushWriteQueue blocks (up to writeTimeout) until the write queue is empty
+// and the writeLoop has had a chance to flush. Used after sending fatal-error
+// frames so the client actually receives the error before the conn closes.
+//
+// Why this exists: writes are async (writeLoop goroutine drains the queue).
+// If dispatch.run() returns immediately after sendError, the defer chain
+// closes the conn before writeLoop drains — client sees a "peer close frame"
+// without the error envelope and can't tell what went wrong.
+func (cn *Conn) flushWriteQueue() {
+	deadline := time.Now().Add(writeTimeout)
+	for time.Now().Before(deadline) {
+		if len(cn.writeCh) == 0 {
+			// Queue empty — give writeLoop a sliver to actually emit the
+			// last frame on the wire. 50 ms is plenty for a single small
+			// text frame even on long-RTT links.
+			time.Sleep(50 * time.Millisecond)
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

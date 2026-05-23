@@ -524,6 +524,12 @@ func (s *Server) send(conn *Conn, typ, id string, payload any) error {
 func (s *Server) sendError(conn *Conn, reqID, code, msg string) {
 	_ = s.send(conn, proto.TypeError, reqID, proto.ErrorData{Code: code, Message: msg})
 	s.Metrics.LabeledCounter("nu_errors_total", "code").Inc(code)
+	// Make sure the frame is actually flushed to the wire before the caller
+	// returns and the deferred conn close fires. Without this, fatal-error
+	// frames (BAD_USERNAME / SERVER_PASSWORD_REQUIRED / etc.) get queued but
+	// the writeLoop is cancelled by the close(doneCh) before it can drain,
+	// and the client just sees a bare "peer close frame" with no envelope.
+	conn.flushWriteQueue()
 }
 
 func (s *Server) protoError(conn *Conn, reason string) error {

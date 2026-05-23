@@ -48,9 +48,22 @@ SSH 登录服务器（root），复制粘贴这一条：
 curl -fsSL https://raw.githubusercontent.com/GeekASMR/network-ultra-server/main/scripts/install-from-source.sh | sudo bash
 ```
 
-脚本自动：检测架构 → 装 Go → 拉源码 → 编译 → 生成配置 → 注册 systemd → 启动 → 健康检查。约 1~3 分钟。
+脚本自动：检测架构 → 装 Go → 拉源码 → 编译 → 生成配置 → **引导设置服务器密码** → 注册 systemd → 启动 → 健康检查。约 1~3 分钟。
 
-成功的标志：屏幕底部出现绿色 `Network Ultra Server 已成功启动` + 服务器公网 IP 和 admin token。
+成功的标志：屏幕底部出现绿色 `Network Ultra Server 已成功启动` + 服务器公网 IP + 服务器密码 + admin token。
+
+> **🔒 关于服务器密码（v1.3+）**
+>
+> 安装过程中会提示你设置一个服务器连接密码。所有连进来的 VST 客户端必须填这个密码才能加入。
+>
+> 三个选项：
+> - 直接回车 → 使用建议的随机 12 字符密码（最稳，记下来分发给朋友即可）
+> - 输入 `open` → 不设密码，公开服务器，任何知道地址的人都能连
+> - 输入自定义字符串 → 使用你自己的密码
+>
+> 安装完成后密码会显示在终端。**记得复制保存**，分发给信任的客户端使用者。
+>
+> 如果是用 `curl ... | sudo bash` 管道安装（非交互），脚本默认随机生成。可用环境变量 `NU_SERVER_PASSWORD="..."` 在管道场景下指定。
 
 ### 验证从外网能连
 
@@ -79,6 +92,14 @@ ws://<你的服务器IP>:18900
 ```
 
 输入用户名 → 连接 → 创建/加入房间。
+
+> **🔒 服务器要求密码时**
+>
+> 客户端 v1.3+ 第一次连接如果服务器启用了密码，会**自动弹窗**让你输入。输入正确后会本地加密保存（`%APPDATA%\Network Ultra\secrets.bin`，DPAPI 加密绑当前 Windows 用户），下次开 DAW 自动填入不用再输。
+>
+> 输错时弹窗会提示"服务器密码错误"，本地缓存会被清掉，让你重输一次。
+>
+> 老客户端 v1.2.1 及更早版本不支持服务器密码——服务器会拒绝它们的连接，请升级到 v1.3+ 安装包。
 
 ---
 
@@ -142,6 +163,45 @@ sudo rm -rf /etc/network-ultra /opt/network-ultra-src
 sudo systemctl daemon-reload
 ```
 
+### Q6：怎么改服务器密码
+
+跑这条一行命令（v1.3+）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/GeekASMR/network-ultra-server/main/scripts/set-password.sh | sudo bash
+```
+
+会弹两次密码提示（第二次确认避免输错），自动写入 `/etc/network-ultra/config.toml` + 重启服务 + 健康检查 + 显示新密码。
+
+也可以一次性命令式（无交互）：
+
+```bash
+# 一行设密码
+curl -fsSL https://raw.githubusercontent.com/GeekASMR/network-ultra-server/main/scripts/set-password.sh -o /tmp/setpwd.sh
+sudo bash /tmp/setpwd.sh "你的新密码"
+
+# 一行关密码（让服务器变成公开的）
+sudo bash /tmp/setpwd.sh --open
+```
+
+改完后**已连接的老客户端会立即被踢断**（hello 重发时验证失败），需要把新密码分发给所有用户。本地缓存了旧密码的客户端会自动弹窗提示"服务器密码错误"，让用户输新密码。
+
+### Q7：忘了服务器密码
+
+直接 SSH 上服务器：
+
+```bash
+sudo grep '^password' /etc/network-ultra/config.toml
+```
+
+会输出 `password = "xxx"`，明文存放（config.toml 是 root 0640 权限，普通用户读不到）。
+
+如果连 SSH 都丢了，那就只能直接登腾讯云/阿里云控制台 web shell 上去看，或者重跑安装脚本生成新密码（旧 config 会被保留覆盖，重新设置）。
+
+### Q8：手动改 config 不重启服务，密码会立刻生效吗
+
+不会。服务器启动时把配置里的密码用 bcrypt 哈希一次塞内存里，运行期不重读。改完 `password` 字段必须 `sudo systemctl restart network-ultra-server`。建议直接用上面 Q6 的脚本，自带重启。
+
 ---
 
 ## 配置文件
@@ -156,6 +216,7 @@ max_rooms = 50
 max_peers_per_room = 8
 max_connections = 200
 admin_token = "<安装脚本自动生成>"
+password = "<安装脚本引导你设置;留空=公开服务器>"   # v1.3+
 
 [tls]
 enabled = false                       # 默认明文 ws，自建场景最常用
